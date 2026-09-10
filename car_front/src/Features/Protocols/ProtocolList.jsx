@@ -1,6 +1,7 @@
 import {useEffect, useMemo, useState} from "react";
 import {useNavigate} from "react-router-dom";
 import api from "../../shared/api.jsx";
+import {baseURL} from "../../shared/config.jsx";
 
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -71,16 +72,10 @@ function getStatusChipSx(status) {
 }
 
 function getWebSocketUrl() {
-    const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const backendUrl = new URL(baseURL);
+    const wsProtocol = backendUrl.protocol === "https:" ? "wss:" : "ws:";
 
-    if (
-        window.location.hostname === "localhost" ||
-        window.location.hostname === "127.0.0.1"
-    ) {
-        return `${wsProtocol}://127.0.0.1:8000/ws/protocols/`;
-    }
-
-    return `${wsProtocol}://${window.location.hostname}:8000/ws/protocols/`;
+    return `${wsProtocol}//${backendUrl.host}/ws/protocols/`;
 }
 
 function createProtocolWebSocket() {

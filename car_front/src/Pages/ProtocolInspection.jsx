@@ -1412,7 +1412,6 @@ function ProtocolInspection() {
         try {
             setLoading(true);
             setErrorMessage("");
-            protocolLockActiveRef.current = false;
 
             let response = await api.get(`/cars/protocols/${protocolId}/full/`);
             let data = response.data;
