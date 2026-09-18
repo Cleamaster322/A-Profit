@@ -6,6 +6,7 @@ import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 function ProtocolInspectionMisc({
                                     form,
                                     handleChange,
+    measurementMode = false,
                                     textFieldSx,
                                     selectFieldSx,
                                     sectionPaperSx,
@@ -338,11 +339,11 @@ function ProtocolInspectionMisc({
                 })}
             </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
+            {!measurementMode && <Typography variant="h6" sx={subsectionTitleSx}>
                 Габаритные размеры ТС
-            </Typography>
+            </Typography>}
 
-            <Grid container spacing={2} sx={{mb: 3}}>
+            {!measurementMode && <Grid container spacing={2} sx={{mb: 3}}>
                 {renderField({
                     form,
                     handleChange,
@@ -369,13 +370,13 @@ function ProtocolInspectionMisc({
                     name: "vehicle_height_mm",
                     md: 4,
                 })}
-            </Grid>
+            </Grid>}
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
+            {!measurementMode && <Typography variant="h6" sx={subsectionTitleSx}>
                 Масса и нагрузка на ось
-            </Typography>
+            </Typography>}
 
-            <Grid container spacing={2}>
+            {!measurementMode && <Grid container spacing={2}>
                 {renderField({
                     form,
                     handleChange,
@@ -400,7 +401,7 @@ function ProtocolInspectionMisc({
                     name: "axle2_load_kg",
                     md: 4,
                 })}
-            </Grid>
+            </Grid>}
         </Paper>
     );
 }

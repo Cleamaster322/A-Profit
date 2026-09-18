@@ -18,12 +18,14 @@ import AppHeader from "../AppHeader/AppHeader.jsx";
 
 function getStatusText(status) {
     switch (status) {
-        case "draft":
-            return "Черновик";
-        case "in_progress":
-            return "В работе";
-        case "completed":
-            return "Завершён";
+        case "measurement":
+            return "У замерщика";
+        case "operator":
+            return "У оператора";
+        case "review":
+            return "На проверке";
+        case "revision":
+            return "На доработке";
         case "approved":
             return "Утверждён";
         case "cancelled":
@@ -34,7 +36,7 @@ function getStatusText(status) {
 }
 
 function getStatusChipSx(status) {
-    if (status === "completed") {
+    if (status === "review") {
         return {
             bgcolor: "black",
             color: "white",
@@ -43,7 +45,7 @@ function getStatusChipSx(status) {
         };
     }
 
-    if (status === "in_progress") {
+    if (status === "operator" || status === "measurement" || status === "revision") {
         return {
             bgcolor: "black",
             color: "white",
@@ -52,7 +54,7 @@ function getStatusChipSx(status) {
         };
     }
 
-    if (status === "draft") {
+    if (status === "measurement") {
         return {
             bgcolor: "white",
             color: "black",
@@ -105,7 +107,7 @@ function ProtocolCard({
                           canManageProtocols,
                           showReviewActions,
                       }) {
-    const isLocked = protocol.status === "in_progress";
+    const isLocked = Boolean(protocol.locked_by_id || protocol.locked_by);
     const isReturnedForRevision = Boolean(protocol.returned_for_revision);
 
     return (
@@ -278,7 +280,7 @@ function ProtocolCard({
                         Освободить
                     </Button>
                 )}
-                {showReviewActions && canManageProtocols && protocol.status === "completed" && (
+                {showReviewActions && canManageProtocols && protocol.status === "review" && (
                     <>
                         <Button
                             variant="contained"
@@ -344,7 +346,7 @@ function ProtocolList({
     const [searchQuery, setSearchQuery] = useState("");
     const [currentUser, setCurrentUser] = useState(null);
 
-    const showReviewActions = statuses.includes("completed");
+    const showReviewActions = statuses.includes("review");
 
     const loadProtocols = async (options = {}) => {
         const {silent = false} = options;
@@ -563,7 +565,11 @@ function ProtocolList({
     };
 
     const handleOpen = (protocol) => {
-        navigate(`/protocols/${protocol.id}/inspection`);
+        const path = protocol.status === "measurement"
+            ? "measurement"
+            : "inspection";
+
+        navigate(`/protocols/${protocol.id}/${path}`);
     };
 
     const canManageProtocols = Boolean(
@@ -574,7 +580,7 @@ function ProtocolList({
 
     const handleManagerReleaseLock = async (protocolId) => {
         const confirmed = window.confirm(
-            "Освободить протокол? Он снова станет доступен как черновик."
+            "Освободить протокол? Он останется на текущем этапе и станет доступен другим пользователям."
         );
 
         if (!confirmed) {
@@ -589,7 +595,6 @@ function ProtocolList({
                     protocol.id === protocolId
                         ? {
                             ...protocol,
-                            status: "draft",
                             locked_by: null,
                             locked_by_id: null,
                             locked_by_username: null,

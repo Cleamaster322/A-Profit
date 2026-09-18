@@ -6,6 +6,7 @@ import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 function ProtocolInspectionEngine({
                                       form,
                                       handleChange,
+                                      measurementMode = false,
                                       textFieldSx,
                                       selectFieldSx,
                                       sectionPaperSx,
@@ -23,7 +24,7 @@ function ProtocolInspectionEngine({
             </Typography>
 
             <Grid container spacing={2} sx={{mb: 2}}>
-                {renderField({
+                {!measurementMode && renderField({
                     form,
                     handleChange,
                     textFieldSx,
@@ -32,7 +33,7 @@ function ProtocolInspectionEngine({
                     md: 6,
                 })}
 
-                {renderField({
+                {!measurementMode && renderField({
                     form,
                     handleChange,
                     textFieldSx,
@@ -106,10 +107,15 @@ function ProtocolInspectionEngine({
                     form,
                     handleChange,
                     selectFieldSx,
-                    label: "Турбонаддув",
-                    name: "turbo_present",
+                    label: measurementMode ? "Нагнетатель" : "Турбонаддув",
+                    name: measurementMode ? "supercharger" : "turbo_present",
                     md: 4,
-                    options: [
+                    options: measurementMode ? [
+                        {value: "absent", label: "Отсутствует"},
+                        {value: "compressor", label: "Компрессор"},
+                        {value: "turbo", label: "Турбина"},
+                        {value: "twin_turbo", label: "Твин-турбо"},
+                    ] : [
                         {value: "true", label: "Наличие"},
                         {value: "false", label: "Отсутствие"},
                     ],

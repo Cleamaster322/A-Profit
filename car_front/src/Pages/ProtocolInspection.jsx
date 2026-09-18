@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState} from "react";
-import {useNavigate, useParams} from "react-router-dom";
+import {useLocation, useNavigate, useParams} from "react-router-dom";
 import api from "../shared/api.jsx";
 
 import Box from "@mui/material/Box";
@@ -7,6 +7,12 @@ import Button from "@mui/material/Button";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
 import Chip from "@mui/material/Chip";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
+import MenuItem from "@mui/material/MenuItem";
+import TextField from "@mui/material/TextField";
 
 import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolInspectionHeader.jsx";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
@@ -36,6 +42,10 @@ const initialForm = {
     appendix_number: "",
     protocol_date: "",
     status: "",
+    model_id: "",
+    generation_id: "",
+    configuration_id: "",
+    revision_comment: "",
     owner_last_name: "",
     owner_first_name: "",
     owner_middle_name: "",
@@ -75,6 +85,7 @@ const initialForm = {
 
     engine_model: "",
     engine_power_kw: "",
+    supercharger: "",
     engine_layout: "",
     cylinder_layout: "",
     cylinders_count: "",
@@ -793,6 +804,11 @@ function mapProtocolToForm(data) {
         appendix_number: toFormValue(protocol.appendix_number, protocolDashFields, "appendix_number"),
         protocol_date: protocol.protocol_date || "",
         status: protocol.status || "",
+        model_id: protocol.model || "",
+        generation_id: protocol.generation || "",
+        configuration_id: protocol.configuration || "",
+        revision_comment: protocol.revision_comment || "",
+        supercharger: toFormValue(protocol.supercharger, protocolDashFields, "supercharger"),
 
         owner_last_name: toFormValue(protocol.owner_last_name, protocolDashFields, "owner_last_name"),
         owner_first_name: toFormValue(protocol.owner_first_name, protocolDashFields, "owner_first_name"),
@@ -973,6 +989,7 @@ function buildProtocolPayload(form) {
         vin: emptyToNull(form.vin),
         vehicle_category: emptyToNull(form.category),
         body_type: emptyToNull(form.body_type),
+        supercharger: emptyToNull(form.supercharger),
         wheel_marking_front: emptyToNull(form.tire_marking_front),
         wheel_marking_rear: emptyToNull(form.tire_marking_rear),
         tire_season: emptyToNull(form.tire_season),
@@ -1206,9 +1223,10 @@ function buildLightPayload(form) {
     return normalizeNumericPayload(payload, LIGHT_NUMERIC_FIELDS);
 }
 
-function ProtocolInspection() {
+function ProtocolInspection({measurementMode = false}) {
     const {id} = useParams();
     const navigate = useNavigate();
+    const location = useLocation();
 
     const currentProtocolId = id;
 
@@ -1224,6 +1242,11 @@ function ProtocolInspection() {
     const [successMessage, setSuccessMessage] = useState("");
     const [errorMessage, setErrorMessage] = useState("");
     const [blockErrors, setBlockErrors] = useState({});
+    const [catalogConfiguration, setCatalogConfiguration] = useState(null);
+    const [dataReviewOpen, setDataReviewOpen] = useState(
+        Boolean(location.state?.openDataReview)
+    );
+    const [dataReviewChoices, setDataReviewChoices] = useState({});
 
     const headerRef = useRef(null);
     const conditionsRef = useRef(null);
@@ -1342,7 +1365,7 @@ function ProtocolInspection() {
             return;
         }
 
-        if (formStatusRef.current === "completed") {
+        if (["approved", "cancelled"].includes(formStatusRef.current)) {
             return;
         }
 
@@ -1351,12 +1374,7 @@ function ProtocolInspection() {
 
             await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
 
-            formStatusRef.current = "draft";
-
-            setForm((prev) => ({
-                ...prev,
-                status: "draft",
-            }));
+            await loadProtocol(currentProtocolId);
         } catch (error) {
             console.error("Ошибка освобождения протокола:", error);
 
@@ -1375,7 +1393,7 @@ function ProtocolInspection() {
             return;
         }
 
-        if (formStatusRef.current === "completed") {
+        if (["approved", "cancelled"].includes(formStatusRef.current)) {
             return;
         }
 
@@ -1383,6 +1401,7 @@ function ProtocolInspection() {
 
         const accessToken = localStorage.getItem("accessToken");
         const baseUrl = api.client.defaults.baseURL || "";
+        const csrfToken = api.client.defaults.headers.common["X-CSRFToken"];
 
         try {
             fetch(`${baseUrl}/cars/protocols/${currentProtocolId}/return-to-draft/`, {
@@ -1392,6 +1411,7 @@ function ProtocolInspection() {
                 headers: {
                     "Content-Type": "application/json",
                     "X-Requested-With": "XMLHttpRequest",
+                    ...(csrfToken ? {"X-CSRFToken": csrfToken} : {}),
                     ...(accessToken ? {Authorization: `Bearer ${accessToken}`} : {}),
                 },
                 body: JSON.stringify({}),
@@ -1416,7 +1436,7 @@ function ProtocolInspection() {
             let response = await api.get(`/cars/protocols/${protocolId}/full/`);
             let data = response.data;
 
-            if (startEditing && data.status !== "completed") {
+            if (startEditing && !["approved", "cancelled"].includes(data.status)) {
                 await api.post(`/cars/protocols/${protocolId}/start-editing/`);
 
                 protocolLockActiveRef.current = true;
@@ -1466,6 +1486,22 @@ function ProtocolInspection() {
     }, [id]);
 
     useEffect(() => {
+        if (!location.state?.openDataReview || !form.configuration_id) {
+            return;
+        }
+
+        api.get(`/cars/configurations/${form.configuration_id}/`)
+            .then((response) => {
+                setCatalogConfiguration(response.data);
+                setDataReviewOpen(true);
+            })
+            .catch((error) => {
+                console.error("Ошибка загрузки данных Drom:", error);
+                setErrorMessage("Не удалось загрузить данные Drom для проверки");
+            });
+    }, [form.configuration_id, location.state]);
+
+    useEffect(() => {
         formStatusRef.current = form.status;
     }, [form.status]);
 
@@ -1479,7 +1515,7 @@ function ProtocolInspection() {
                 return;
             }
 
-            if (formStatusRef.current === "completed") {
+            if (["approved", "cancelled", "review"].includes(formStatusRef.current)) {
                 return;
             }
 
@@ -1517,7 +1553,7 @@ function ProtocolInspection() {
                 return;
             }
 
-            if (formStatusRef.current === "completed") {
+            if (["approved", "cancelled"].includes(formStatusRef.current)) {
                 return;
             }
 
@@ -1542,6 +1578,7 @@ function ProtocolInspection() {
 
     const handleSave = async (options = {}) => {
         const {showSuccessMessage = true} = options;
+        const activeForm = options.formOverride || form;
 
         try {
             setSaving(true);
@@ -1563,7 +1600,7 @@ function ProtocolInspection() {
                     request: () =>
                         api.patch(
                             `/cars/protocols/${protocolId}/update/`,
-                            buildProtocolPayload(form)
+                            buildProtocolPayload(activeForm)
                         ),
                 },
                 {
@@ -1572,17 +1609,17 @@ function ProtocolInspection() {
                     request: async () => {
                         await api.patch(
                             `/cars/protocols/${protocolId}/test-conditions/update/`,
-                            buildTestConditionsPayload(form)
+                            buildTestConditionsPayload(activeForm)
                         );
 
                         await api.patch(
                             `/cars/protocols/${protocolId}/road-conditions/update/`,
-                            buildRoadConditionsPayload(form)
+                            buildRoadConditionsPayload(activeForm)
                         );
 
                         await api.patch(
                             `/cars/protocols/${protocolId}/power-supply/update/`,
-                            buildPowerSupplyPayload(form)
+                            buildPowerSupplyPayload(activeForm)
                         );
                     },
                 },
@@ -1593,7 +1630,7 @@ function ProtocolInspection() {
                     request: () =>
                         api.patch(
                             `/cars/protocols/${protocolId}/measurement/update/`,
-                            buildMeasurementPayload(form)
+                            buildMeasurementPayload(activeForm)
                         ),
                 },
                 {
@@ -1602,7 +1639,7 @@ function ProtocolInspection() {
                     request: () =>
                         api.patch(
                             `/cars/protocols/${protocolId}/brake/update/`,
-                            buildBrakePayload(form)
+                            buildBrakePayload(activeForm)
                         ),
                 },
                 {
@@ -1612,7 +1649,7 @@ function ProtocolInspection() {
                     request: () =>
                         api.patch(
                             `/cars/protocols/${protocolId}/light/update/`,
-                            buildLightPayload(form)
+                            buildLightPayload(activeForm)
                         ),
                 },
             ];
@@ -1660,7 +1697,9 @@ function ProtocolInspection() {
         }
 
         const confirmed = window.confirm(
-            "Завершить протокол? После этого он исчезнет из списка протоколов в работе и появится в завершённых."
+            measurementMode
+                ? "Передать протокол оператору? После этого замерщик больше не сможет его редактировать."
+                : "Отправить протокол на проверку? После этого он перейдёт руководителю."
         );
 
         if (!confirmed) {
@@ -1672,24 +1711,27 @@ function ProtocolInspection() {
             setSuccessMessage("");
             setErrorMessage("");
 
-            const protocolPayload = {
-                ...buildProtocolPayload(form),
-                status: "completed",
-            };
+            const transitionPath = measurementMode
+                ? "submit-to-operator"
+                : "submit-for-review";
 
-            await api.patch(`/cars/protocols/${currentProtocolId}/update/`, protocolPayload);
+            await api.post(`/cars/protocols/${currentProtocolId}/${transitionPath}/`);
 
             protocolLockActiveRef.current = false;
-            formStatusRef.current = "completed";
+            formStatusRef.current = measurementMode ? "operator" : "review";
 
             setForm((prev) => ({
                 ...prev,
-                status: "completed",
+                status: measurementMode ? "operator" : "review",
             }));
 
-            setSuccessMessage("Протокол переведён в статус «Завершён»");
+            setSuccessMessage(
+                measurementMode
+                    ? "Протокол передан оператору"
+                    : "Протокол отправлен на проверку"
+            );
 
-            navigate("/protocols/completed");
+            navigate(measurementMode ? "/home" : "/protocols");
         } catch (error) {
             console.error("Ошибка завершения протокола:", error);
             setErrorMessage("Не удалось завершить протокол");
@@ -1776,6 +1818,7 @@ function ProtocolInspection() {
     const commonSectionProps = {
         form,
         handleChange,
+        measurementMode,
         textFieldSx,
         selectFieldSx,
         sectionPaperSx,
@@ -1783,7 +1826,75 @@ function ProtocolInspection() {
         subsectionTitleSx,
     };
 
-    const isCompleted = form.status === "completed";
+    const isFinal = ["approved", "cancelled"].includes(form.status);
+    const isOperatorStage = !measurementMode && ["operator", "revision"].includes(form.status);
+    const dataReviewRows = [
+        {
+            key: "front_tires",
+            label: "Передние шины",
+            catalog: catalogConfiguration?.front_tires,
+            measured: form.tire_marking_front,
+            formField: "tire_marking_front",
+        },
+        {
+            key: "rear_tires",
+            label: "Задние шины",
+            catalog: catalogConfiguration?.rear_tires,
+            measured: form.tire_marking_rear,
+            formField: "tire_marking_rear",
+        },
+        {
+            key: "fuel_type",
+            label: "Топливо",
+            catalog: catalogConfiguration?.fuel_type,
+            measured: form.fuel_type,
+            formField: "fuel_type",
+        },
+        {
+            key: "drive_type",
+            label: "Привод",
+            catalog: catalogConfiguration?.drive_type,
+            measured: form.wheel_formula,
+            formField: "wheel_formula",
+        },
+        {
+            key: "transmission",
+            label: "Коробка передач",
+            catalog: catalogConfiguration?.transmission,
+            measured: form.transmission_type,
+            formField: "transmission_type",
+        },
+        {
+            key: "seats_count",
+            label: "Количество мест",
+            catalog: catalogConfiguration?.seats_count,
+            measured: form.seats_count,
+            formField: "seats_count",
+        },
+    ];
+
+    const handleDataReviewSave = async () => {
+        const nextForm = {...form};
+
+        dataReviewRows.forEach((row) => {
+            if (dataReviewChoices[row.key] === "measured" && row.measured !== null && row.measured !== undefined) {
+                nextForm[row.formField] = row.measured;
+            }
+        });
+
+        setForm(nextForm);
+        const saved = await handleSave({
+            showSuccessMessage: false,
+            formOverride: nextForm,
+        });
+
+        if (!saved) {
+            return;
+        }
+
+        setDataReviewOpen(false);
+        setSuccessMessage("Проверка данных сохранена");
+    };
     const actionButtons = (
         <Box
             sx={{
@@ -1796,7 +1907,7 @@ function ProtocolInspection() {
                 },
             }}
         >
-            <Button
+            {!measurementMode && <Button
                 variant="outlined"
                 onClick={handleGenerateDocx}
                 disabled={!currentProtocolId || saving || loading}
@@ -1815,9 +1926,9 @@ function ProtocolInspection() {
                 }}
             >
                 {saving ? "Сохранение..." : "Сформировать DOCX"}
-            </Button>
+            </Button>}
 
-            {isCompleted ? (
+            {isFinal ? (
                 <Button
                     variant="contained"
                     onClick={handleReturnToDraft}
@@ -1838,7 +1949,7 @@ function ProtocolInspection() {
                         },
                     }}
                 >
-                    Вернуть в черновик
+                    Освободить протокол
                 </Button>
             ) : (
                 <Button
@@ -1860,7 +1971,11 @@ function ProtocolInspection() {
                         },
                     }}
                 >
-                    Завершить протокол
+                    {saving
+                        ? "Сохранение..."
+                        : measurementMode
+                            ? "Передать оператору"
+                            : "Отправить на проверку"}
                 </Button>
             )}
 
@@ -1890,6 +2005,87 @@ function ProtocolInspection() {
 
     return (
         <>
+            <Dialog
+                open={dataReviewOpen && Boolean(catalogConfiguration)}
+                onClose={() => setDataReviewOpen(false)}
+                maxWidth="lg"
+                fullWidth
+            >
+                <DialogTitle sx={{fontWeight: 800}}>
+                    Проверка данных автомобиля
+                </DialogTitle>
+                <DialogContent dividers>
+                    <Typography variant="body2" sx={{mb: 2, color: "text.secondary"}}>
+                        Сравните данные каталога Drom с фактическими данными замерщика.
+                    </Typography>
+                    <Box sx={{display: "grid", gap: 1}}>
+                        <Box
+                            sx={{
+                                display: "grid",
+                                gridTemplateColumns: "1.2fr 1fr 1fr 1.2fr",
+                                gap: 1,
+                                fontWeight: 800,
+                                px: 1,
+                            }}
+                        >
+                            <Typography>Параметр</Typography>
+                            <Typography>Drom</Typography>
+                            <Typography>Замерщик</Typography>
+                            <Typography>Итог</Typography>
+                        </Box>
+                        {dataReviewRows.map((row) => {
+                            const catalogValue = row.catalog || "—";
+                            const measuredValue = row.measured || "—";
+                            const same = String(catalogValue) === String(measuredValue);
+                            const choice = dataReviewChoices[row.key] || "catalog";
+
+                            return (
+                                <Box
+                                    key={row.key}
+                                    sx={{
+                                        display: "grid",
+                                        gridTemplateColumns: "1.2fr 1fr 1fr 1.2fr",
+                                        gap: 1,
+                                        alignItems: "center",
+                                        border: "1px solid #ddd",
+                                        p: 1,
+                                        bgcolor: same ? "#f7fff7" : "#fffaf0",
+                                    }}
+                                >
+                                    <Typography sx={{fontWeight: 700}}>{row.label}</Typography>
+                                    <Typography variant="body2">{catalogValue}</Typography>
+                                    <Typography variant="body2">{measuredValue}</Typography>
+                                    {same ? (
+                                        <Chip label="Совпадает" size="small" sx={{borderRadius: 0, bgcolor: "#d9f2d9", color: "black", width: "fit-content"}} />
+                                    ) : (
+                                        <TextField
+                                            select
+                                            size="small"
+                                            value={choice}
+                                            label="Выбрать"
+                                            onChange={(event) => setDataReviewChoices((previous) => ({
+                                                ...previous,
+                                                [row.key]: event.target.value,
+                                            }))}
+                                        >
+                                            <MenuItem value="catalog">Drom</MenuItem>
+                                            <MenuItem value="measured">Замерщик</MenuItem>
+                                        </TextField>
+                                    )}
+                                </Box>
+                            );
+                        })}
+                    </Box>
+                </DialogContent>
+                <DialogActions sx={{p: 2}}>
+                    <Button onClick={() => setDataReviewOpen(false)} sx={{color: "black", textTransform: "none"}}>
+                        Позже
+                    </Button>
+                    <Button onClick={handleDataReviewSave} variant="contained" sx={{bgcolor: "black", borderRadius: 0, textTransform: "none", boxShadow: "none", "&:hover": {bgcolor: "#222", boxShadow: "none"}}}>
+                        Сохранить результаты проверки
+                    </Button>
+                </DialogActions>
+            </Dialog>
             <AppHeader beforeNavigate={releaseProtocolLock}/>
 
             <Box sx={pageSx}>
@@ -1913,7 +2109,7 @@ function ProtocolInspection() {
                                     mb: 0.8,
                                 }}
                             >
-                                Осмотр автомобиля
+                                {measurementMode ? "Ввод данных замерщика" : "Осмотр автомобиля"}
                             </Typography>
 
                             <Typography
@@ -1923,10 +2119,68 @@ function ProtocolInspection() {
                                     mb: 1.5,
                                 }}
                             >
-                                Заполнение данных осмотра, условий испытаний, фотографий и результатов замеров.
+                                {measurementMode
+                                    ? "Заполните доступные данные и передайте протокол оператору."
+                                    : "Заполнение данных осмотра, условий испытаний, фотографий и результатов замеров."}
                             </Typography>
 
-                            <Box
+                            {measurementMode && (
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 1,
+                                        flexWrap: "wrap",
+                                    }}
+                                >
+                                    <Chip
+                                        label="Этап 1 из 2"
+                                        sx={{
+                                            borderRadius: 0,
+                                            bgcolor: "black",
+                                            color: "white",
+                                            fontWeight: 800,
+                                        }}
+                                    />
+                                    <Typography variant="body2" sx={{fontWeight: 700}}>
+                                        После передачи протокол продолжит оператор
+                                    </Typography>
+                                </Box>
+                            )}
+
+                            {isOperatorStage && (
+                                <Box sx={{display: "grid", gap: 1, maxWidth: 760}}>
+                                    <Box
+                                        sx={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 1,
+                                            flexWrap: "wrap",
+                                        }}
+                                    >
+                                        <Chip
+                                            label="Этап 2 из 2"
+                                            sx={{
+                                                borderRadius: 0,
+                                                bgcolor: "black",
+                                                color: "white",
+                                                fontWeight: 800,
+                                            }}
+                                        />
+                                        <Typography variant="body2" sx={{fontWeight: 700}}>
+                                            Выберите поколение и конфигурацию, затем заполните протокол
+                                        </Typography>
+                                    </Box>
+
+                                    {form.status === "revision" && form.revision_comment && (
+                                        <Alert severity="error" sx={{borderRadius: 0}}>
+                                            <b>Что нужно исправить:</b> {form.revision_comment}
+                                        </Alert>
+                                    )}
+                                </Box>
+                            )}
+
+                            {!measurementMode && <Box
                                 sx={{
                                     display: "flex",
                                     gap: 1,
@@ -1968,7 +2222,7 @@ function ProtocolInspection() {
                                         fontWeight: 800,
                                     }}
                                 />
-                            </Box>
+                            </Box>}
                         </Box>
 
                         {actionButtons}
@@ -2010,10 +2264,50 @@ function ProtocolInspection() {
                         </Alert>
                     )}
 
-                    <Box ref={headerRef}>
-                        <BlockError message={blockErrors.header}/>
-                        <ProtocolInspectionHeader {...commonSectionProps} />
-                    </Box>
+                    {!measurementMode && ["operator", "revision"].includes(form.status) && (
+                        <Box
+                            sx={{
+                                mb: 2,
+                                p: 2,
+                                border: "2px solid black",
+                                bgcolor: "white",
+                            }}
+                        >
+                            <Typography variant="h6" sx={{fontWeight: 800, mb: 1.5}}>
+                                Автомобиль для протокола
+                            </Typography>
+                            <Typography variant="body2" sx={{mb: 1.5, color: "text.secondary"}}>
+                                Откройте отдельный экран с фотографиями, регионами и характеристиками поколений.
+                            </Typography>
+                            <Button
+                                variant="contained"
+                                onClick={() => navigate(`/protocols/${currentProtocolId}/vehicle-selection`)}
+                                sx={{
+                                    bgcolor: "black",
+                                    color: "white",
+                                    borderRadius: 0,
+                                    textTransform: "none",
+                                    fontWeight: 800,
+                                    boxShadow: "none",
+                                    "&:hover": {bgcolor: "#222", boxShadow: "none"},
+                                }}
+                            >
+                                Открыть выбор поколения и конфигурации
+                            </Button>
+                            {(form.generation_id || form.configuration_id) && (
+                                <Typography variant="body2" sx={{mt: 1, fontWeight: 700}}>
+                                    Выбор уже сохранён. Его можно изменить на отдельной странице.
+                                </Typography>
+                            )}
+                        </Box>
+                    )}
+
+                    {!measurementMode && (
+                        <Box ref={headerRef}>
+                            <BlockError message={blockErrors.header}/>
+                            <ProtocolInspectionHeader {...commonSectionProps} />
+                        </Box>
+                    )}
 
                     <Box ref={conditionsRef}>
                         <BlockError message={blockErrors.conditions}/>

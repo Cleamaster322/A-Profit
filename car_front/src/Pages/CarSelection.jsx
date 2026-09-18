@@ -153,6 +153,7 @@ function buildCreateProtocolPayload({
                                     }) {
     const payload = {
         owner_name: "Не указано",
+        model: selectedModel?.id || null,
         brand_name: selectedBrand?.name || "",
         commercial_name: selectedModel?.name || "",
         body_type:
@@ -220,6 +221,7 @@ function buildConfigurationLabel(option) {
 
 function CarSelection() {
     const navigate = useNavigate();
+    const showGenerationSelection = Boolean(import.meta.env.VITE_SHOW_GENERATION_SELECTION);
 
     const emptyConfigurationFilterOptions = {
         drive_types: [],
@@ -341,7 +343,7 @@ function CarSelection() {
     }, [selectedBrand, modelInputValue]);
 
     useEffect(() => {
-        if (!selectedModel) {
+        if (!showGenerationSelection || !selectedModel) {
             setGenerations([]);
             return;
         }
@@ -367,7 +369,7 @@ function CarSelection() {
         }
 
         fetchGenerations();
-    }, [selectedModel]);
+    }, [selectedModel, showGenerationSelection]);
 
     useEffect(() => {
         if (!selectedGeneration) {
@@ -486,7 +488,7 @@ function CarSelection() {
             const response = await api.post("/cars/protocols/create/", payload);
             const createdProtocol = response.data;
 
-            navigate(`/protocols/${createdProtocol.id}/inspection`);
+            navigate(`/protocols/${createdProtocol.id}/measurement`);
         } catch (error) {
             console.error(error);
 
@@ -522,11 +524,11 @@ function CarSelection() {
                                 mb: 0.5,
                             }}
                         >
-                            Выбор автомобиля
+                            Новая машина
                         </Typography>
 
                         <Typography variant="body1" sx={{color: "text.secondary"}}>
-                            Выберите марку, модель, поколение и комплектацию для создания протокола.
+                            Выберите марку и модель, чтобы начать первичный замер.
                         </Typography>
                     </Box>
 
@@ -539,7 +541,7 @@ function CarSelection() {
                                 color: "black",
                             }}
                         >
-                            1. Марка и модель
+                            1. Автомобиль
                         </Typography>
 
                         <Box
@@ -622,7 +624,7 @@ function CarSelection() {
                         </Box>
                     </Paper>
 
-                    {selectedModel && (
+                    {showGenerationSelection && selectedModel && (
                         <Paper sx={{...cardSx, mb: 2.5}}>
                             <Box
                                 sx={{
@@ -1225,7 +1227,7 @@ function CarSelection() {
                                         fontWeight: 700,
                                     }}
                                 >
-                                    Для создания протокола нужно выбрать минимум марку и модель.
+                                    После выбора марки и модели откроется сокращённая форма замерщика.
                                 </Typography>
 
                                 {createProtocolError && (
@@ -1252,7 +1254,7 @@ function CarSelection() {
                                         ? "Создать протокол по выбранной комплектации"
                                         : selectedGeneration
                                             ? "Создать пустой протокол"
-                                            : "Создать протокол по марке и модели"}
+                                            : "Начать первичный замер"}
                             </Button>
                         </Box>
                     </Paper>

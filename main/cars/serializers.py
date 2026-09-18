@@ -373,6 +373,7 @@ class ProtocolSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer)
         read_only_fields = [
             'id',
             'protocol_number',
+            'status',
             'user',
             'locked_by',
             'locked_at',
@@ -621,6 +622,7 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             'protocol_date',
             'status',
             'user',
+            'model',
             'car',
 
             'owner_type',
@@ -651,6 +653,7 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             'has_spikes',
 
             'manufacture_year',
+            'manufacture_date',
             'color',
             'inspection_place',
             'comment',

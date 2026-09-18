@@ -6,6 +6,7 @@ import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 function ProtocolInspectionVehicle({
                                        form,
                                        handleChange,
+                                       measurementMode = false,
                                        textFieldSx,
                                        selectFieldSx,
                                        sectionPaperSx,
@@ -23,7 +24,7 @@ function ProtocolInspectionVehicle({
             </Typography>
 
             <Grid container spacing={2} sx={{mb: 2}}>
-                {renderField({
+                {!measurementMode && renderField({
                     form,
                     handleChange,
                     textFieldSx,
@@ -33,7 +34,7 @@ function ProtocolInspectionVehicle({
                     placeholder: "Nissan",
                 })}
 
-                {renderField({
+                {!measurementMode && renderField({
                     form,
                     handleChange,
                     textFieldSx,

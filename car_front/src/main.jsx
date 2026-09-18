@@ -10,6 +10,9 @@ import ProtocolInspection from "./Pages/ProtocolInspection.jsx";
 import Employees from "./Pages/Employees.jsx";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import ApprovedProtocols from "./Pages/ApprovedProtocols.jsx";
+import ProtocolVehicleSelection from "./Pages/ProtocolVehicleSelection.jsx";
+import MeasurementDashboard from "./Pages/MeasurementDashboard.jsx";
+import MeasurementReadOnly from "./Pages/MeasurementReadOnly.jsx";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
     <BrowserRouter>
@@ -22,6 +25,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(
             <Route path="/protocols/completed" element={<CompletedProtocols />} />
             <Route path="/protocols/approved" element={<ApprovedProtocols  />} />
             <Route path="/protocols/:id/inspection" element={<ProtocolInspection />} />
+            <Route path="/protocols/:id/measurement" element={<ProtocolInspection measurementMode />} />
+            <Route path="/protocols/:id/vehicle-selection" element={<ProtocolVehicleSelection />} />
+            <Route path="/measurement" element={<MeasurementDashboard />} />
+            <Route path="/measurement/:id" element={<MeasurementReadOnly />} />
             <Route path="/employees" element={<Employees />} />
 
         </Routes>

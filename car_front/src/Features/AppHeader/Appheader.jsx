@@ -21,6 +21,7 @@ function AppHeader({beforeNavigate}) {
     const canManageEmployees = Boolean(
         currentUser?.is_superuser || currentUser?.role === "executive_director"
     );
+    const isMeasurer = currentUser?.role === "measurer";
 
     useEffect(() => {
         let isMounted = true;
@@ -158,29 +159,39 @@ function AppHeader({beforeNavigate}) {
                         justifyContent: "flex-end",
                     }}
                 >
-                    <Button
-                        onClick={() => handleNavigate("/protocols")}
-                        disabled={leaving}
-                        sx={navButtonSx(isActive("/protocols"))}
-                    >
-                        Протоколы в работе
-                    </Button>
+                    {isMeasurer ? (
+                        <Button
+                            onClick={() => handleNavigate("/measurement")}
+                            disabled={leaving}
+                            sx={navButtonSx(isActive("/measurement"))}
+                        >
+                            Мои замеры
+                        </Button>
+                    ) : (
+                        <Button
+                            onClick={() => handleNavigate("/protocols")}
+                            disabled={leaving}
+                            sx={navButtonSx(isActive("/protocols"))}
+                        >
+                            Протоколы в работе
+                        </Button>
+                    )}
 
-                    <Button
+                    {!isMeasurer && <Button
                         onClick={() => handleNavigate("/protocols/completed")}
                         disabled={leaving}
                         sx={navButtonSx(isActive("/protocols/completed"))}
                     >
                         Завершенные протоколы
-                    </Button>
+                    </Button>}
 
-                    <Button
+                    {!isMeasurer && <Button
                         onClick={() => handleNavigate("/protocols/approved")}
                         disabled={leaving}
                         sx={navButtonSx(isActive("/protocols/approved"))}
                     >
                         Утверждённые протоколы
-                    </Button>
+                    </Button>}
 
                     {canManageEmployees && (
                         <Button

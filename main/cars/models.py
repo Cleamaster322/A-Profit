@@ -171,11 +171,19 @@ class CarData(models.Model):
 
 class Protocol(DashFieldsMixin, models.Model):
     STATUS_CHOICES = [
-        ('draft', 'Черновик'),
-        ('in_progress', 'В работе'),
-        ('completed', 'Завершён'),
+        ('measurement', 'Работа замерщика'),
+        ('operator', 'Работа оператора'),
+        ('review', 'На проверке'),
+        ('revision', 'На доработке'),
         ('approved', 'Утверждён'),
         ('cancelled', 'Отменён'),
+    ]
+
+    SUPERCHARGER_CHOICES = [
+        ('absent', 'Отсутствует'),
+        ('compressor', 'Компрессор'),
+        ('turbo', 'Турбина'),
+        ('twin_turbo', 'Твин-турбо'),
     ]
 
     OWNER_TYPE_CHOICES = [
@@ -196,7 +204,7 @@ class Protocol(DashFieldsMixin, models.Model):
     id = models.BigAutoField(primary_key=True)
     protocol_number = models.CharField(max_length=100, unique=True, null=True, blank=True)
     protocol_date = models.DateField(null=True, blank=True)
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='draft')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='measurement')
     locked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -218,6 +226,30 @@ class Protocol(DashFieldsMixin, models.Model):
         on_delete=models.RESTRICT,
         related_name='protocols',
         db_column='user_id'
+    )
+    model = models.ForeignKey(
+        Model,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='protocols',
+        db_column='model_id',
+    )
+    generation = models.ForeignKey(
+        Generation,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='protocols',
+        db_column='generation_id',
+    )
+    configuration = models.ForeignKey(
+        Configuration,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='protocols',
+        db_column='configuration_id',
     )
     car = models.ForeignKey(
         CarData,
@@ -250,6 +282,12 @@ class Protocol(DashFieldsMixin, models.Model):
     brand_name = models.CharField(max_length=255, blank=True, null=True)
     vehicle_category = models.CharField(max_length=2, choices=VEHICLE_CATEGORY_CHOICES, blank=True, null=True)
     body_type = models.CharField(max_length=255, blank=True, null=True)
+    supercharger = models.CharField(
+        max_length=20,
+        choices=SUPERCHARGER_CHOICES,
+        blank=True,
+        null=True,
+    )
 
     vin = models.CharField(max_length=50, blank=True, null=True)
     chassis_number = models.CharField(max_length=50, blank=True, null=True)
@@ -263,6 +301,7 @@ class Protocol(DashFieldsMixin, models.Model):
     has_spikes = models.BooleanField(blank=True, null=True)
 
     manufacture_year = models.IntegerField(blank=True, null=True)
+    manufacture_date = models.DateField(blank=True, null=True)
     color = models.CharField(max_length=100, blank=True, null=True)
     inspection_place = models.CharField(max_length=255, blank=True, null=True)
     comment = models.TextField(blank=True, null=True)

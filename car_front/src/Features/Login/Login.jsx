@@ -20,15 +20,22 @@ function Login() {
 
     const navigate = useNavigate();
 
+    async function navigateByRole() {
+        const response = await api.get("/cars/get-user/");
+        if (!response.data.role) {
+            throw new Error("Пользователь не имеет роли");
+        }
+
+        navigate(response.data.role === "measurer" ? "/measurement" : "/protocols");
+    }
+
     useEffect(() => {
         const accessToken = localStorage.getItem("accessToken");
         const refreshToken = localStorage.getItem("refreshToken");
 
         if (accessToken && refreshToken) {
             api.get("/cars/brands/")
-                .then(() => {
-                    navigate("/protocols");
-                })
+                .then(() => navigateByRole())
                 .catch(() => {
                     localStorage.removeItem("accessToken");
                     localStorage.removeItem("refreshToken");
@@ -57,7 +64,7 @@ function Login() {
 
                 await api.setTokenAuth();
 
-                navigate("/protocols");
+                await navigateByRole();
             } else {
                 setError("Ошибка авторизации");
             }
