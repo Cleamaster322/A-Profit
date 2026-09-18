@@ -17,30 +17,11 @@ import MenuItem from "@mui/material/MenuItem";
 import Dialog from "@mui/material/Dialog";
 import DialogContent from "@mui/material/DialogContent";
 import IconButton from "@mui/material/IconButton";
+import {commonSx} from "../theme.js";
 
-const pageSx = {
-    bgcolor: "#f2f2f2",
-    px: 3,
-    py: 3,
-    boxSizing: "border-box",
-};
-
-const pageInnerSx = {
-    border: "2px solid black",
-    borderRadius: 0,
-    p: 3,
-    bgcolor: "#f2f2f2",
-    boxShadow: "none",
-    boxSizing: "border-box",
-};
-
-const cardSx = {
-    border: "2px solid black",
-    borderRadius: 0,
-    p: 2.5,
-    bgcolor: "white",
-    boxShadow: "none",
-};
+const pageSx = {...commonSx.page, boxSizing: "border-box"};
+const pageInnerSx = {...commonSx.pageInner, boxSizing: "border-box"};
+const cardSx = commonSx.card;
 
 const employeeCardSx = {
     border: "1px solid black",
@@ -60,43 +41,9 @@ const modalPaperSx = {
     maxWidth: 560,
 };
 
-const textFieldSx = {
-    bgcolor: "white",
-    "& .MuiOutlinedInput-root": {
-        borderRadius: 0,
-    },
-};
-
-const blackButtonSx = {
-    bgcolor: "black",
-    color: "white",
-    borderRadius: 0,
-    textTransform: "none",
-    px: 3,
-    py: 1,
-    fontWeight: 800,
-    boxShadow: "none",
-    "&:hover": {
-        bgcolor: "#222",
-        boxShadow: "none",
-    },
-    "&.Mui-disabled": {
-        bgcolor: "#cccccc",
-        color: "#666666",
-    },
-};
-
-const outlineButtonSx = {
-    borderColor: "black",
-    color: "black",
-    borderRadius: 0,
-    textTransform: "none",
-    fontWeight: 800,
-    "&:hover": {
-        borderColor: "black",
-        bgcolor: "#eeeeee",
-    },
-};
+const textFieldSx = commonSx.field;
+const blackButtonSx = commonSx.primaryButton;
+const outlineButtonSx = commonSx.secondaryButton;
 
 const USER_ROLES = [
     {
@@ -763,12 +710,7 @@ function Employees() {
                                                                 <Chip
                                                                     label="Суперпользователь"
                                                                     size="small"
-                                                                    sx={{
-                                                                        borderRadius: 0,
-                                                                        bgcolor: "black",
-                                                                        color: "white",
-                                                                        fontWeight: 700,
-                                                                    }}
+                                                                    sx={commonSx.inversePill}
                                                                 />
                                                             )}
 

@@ -3,6 +3,7 @@ import {useNavigate} from "react-router-dom";
 
 import AppHeader from "../Features/AppHeader/AppHeader.jsx";
 import api from "../shared/api.jsx";
+import {getApiErrorMessage} from "../shared/errorHandler.jsx";
 
 import Autocomplete from "@mui/material/Autocomplete";
 import TextField from "@mui/material/TextField";
@@ -15,30 +16,11 @@ import MenuItem from "@mui/material/MenuItem";
 import Button from "@mui/material/Button";
 import Alert from "@mui/material/Alert";
 import Divider from "@mui/material/Divider";
+import {commonSx} from "../theme.js";
 
-const pageSx = {
-    minHeight: "calc(100vh - 56px)",
-    bgcolor: "#f2f2f2",
-    px: 3,
-    py: 3,
-};
-
-const pageInnerSx = {
-    minHeight: "calc(100vh - 112px)",
-    border: "2px solid black",
-    borderRadius: 0,
-    p: 3,
-    bgcolor: "#f2f2f2",
-    boxShadow: "none",
-};
-
-const cardSx = {
-    border: "2px solid black",
-    borderRadius: 0,
-    p: 2.5,
-    bgcolor: "white",
-    boxShadow: "none",
-};
+const pageSx = commonSx.page;
+const pageInnerSx = commonSx.pageInner;
+const cardSx = commonSx.card;
 
 const smallCardSx = {
     border: "1px solid black",
@@ -47,45 +29,9 @@ const smallCardSx = {
     boxShadow: "none",
 };
 
-const textFieldSx = {
-    bgcolor: "white",
-    "& .MuiOutlinedInput-root": {
-        borderRadius: 0,
-    },
-};
-
-const blackButtonSx = {
-    bgcolor: "black",
-    color: "white",
-    borderRadius: 0,
-    textTransform: "none",
-    px: 3,
-    py: 1,
-    fontWeight: 800,
-    boxShadow: "none",
-    border: "1px solid black",
-    "&:hover": {
-        bgcolor: "#222",
-        boxShadow: "none",
-    },
-    "&.Mui-disabled": {
-        bgcolor: "#cccccc",
-        color: "#666666",
-        border: "1px solid #999999",
-    },
-};
-
-const outlineButtonSx = {
-    borderColor: "black",
-    color: "black",
-    borderRadius: 0,
-    textTransform: "none",
-    fontWeight: 800,
-    "&:hover": {
-        borderColor: "black",
-        bgcolor: "#eeeeee",
-    },
-};
+const textFieldSx = commonSx.field;
+const blackButtonSx = commonSx.primaryButton;
+const outlineButtonSx = commonSx.secondaryButton;
 
 function getGenerationImageUrl(generation) {
     if (!generation) return "";
@@ -219,20 +165,20 @@ function buildConfigurationLabel(option) {
     return `${parts.join(" · ")}${period}`;
 }
 
+const emptyConfigurationFilterOptions = {
+    drive_types: [],
+    fuel_types: [],
+    engine_models: [],
+    transmissions: [],
+    seats_counts: [],
+    engine_powers_kw: [],
+    body_marks: [],
+    turbo_values: [],
+};
+
 function CarSelection() {
     const navigate = useNavigate();
     const showGenerationSelection = Boolean(import.meta.env.VITE_SHOW_GENERATION_SELECTION);
-
-    const emptyConfigurationFilterOptions = {
-        drive_types: [],
-        fuel_types: [],
-        engine_models: [],
-        transmissions: [],
-        seats_counts: [],
-        engine_powers_kw: [],
-        body_marks: [],
-        turbo_values: [],
-    };
 
     const emptyConfigurationFilters = {
         drive_type: "",
@@ -492,15 +438,7 @@ function CarSelection() {
         } catch (error) {
             console.error(error);
 
-            const backendError =
-                error.response?.data?.configuration_id?.[0] ||
-                error.response?.data?.configuration_id ||
-                error.response?.data?.commercial_name?.[0] ||
-                error.response?.data?.brand_name?.[0] ||
-                error.response?.data?.error ||
-                error.response?.data?.detail;
-
-            setCreateProtocolError(backendError || "Не удалось создать протокол");
+            setCreateProtocolError(getApiErrorMessage(error, "Не удалось создать протокол"));
         } finally {
             setCreatingProtocol(false);
         }
@@ -659,12 +597,7 @@ function CarSelection() {
                                     label={`${selectedBrand?.name || ""} ${
                                         selectedModel?.name || ""
                                     }`.trim()}
-                                    sx={{
-                                        borderRadius: 0,
-                                        bgcolor: "black",
-                                        color: "white",
-                                        fontWeight: 800,
-                                    }}
+                                    sx={commonSx.inversePill}
                                 />
                             </Box>
 
@@ -802,25 +735,14 @@ function CarSelection() {
                                                                         label={getRegionLabel(
                                                                             generation.region
                                                                         )}
-                                                                        sx={{
-                                                                            borderRadius: 0,
-                                                                            bgcolor: "black",
-                                                                            color: "white",
-                                                                            fontWeight: 700,
-                                                                        }}
+                                                                            sx={commonSx.inversePill}
                                                                     />
 
                                                                     {generation.body_type && (
                                                                         <Chip
                                                                             size="small"
                                                                             label={generation.body_type}
-                                                                            sx={{
-                                                                                borderRadius: 0,
-                                                                                bgcolor: "white",
-                                                                                color: "black",
-                                                                                border: "1px solid black",
-                                                                                fontWeight: 700,
-                                                                            }}
+                                                                            sx={commonSx.outlinePill}
                                                                         />
                                                                     )}
                                                                 </Box>

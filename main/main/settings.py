@@ -61,6 +61,7 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
+    'EXCEPTION_HANDLER': 'cars.api_errors.exception_handler',
 }
 
 SIMPLE_JWT = {

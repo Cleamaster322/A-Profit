@@ -3,6 +3,7 @@ import {useNavigate, useParams} from "react-router-dom";
 
 import AppHeader from "../Features/AppHeader/AppHeader.jsx";
 import api from "../shared/api.jsx";
+import {getApiErrorMessage} from "../shared/errorHandler.jsx";
 
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -25,7 +26,7 @@ function MeasurementReadOnly() {
             .then((response) => setProtocol(response.data))
             .catch((requestError) => {
                 console.error(requestError);
-                setError("Не удалось открыть протокол");
+                setError(getApiErrorMessage(requestError, "Не удалось открыть протокол"));
             });
     }, [id]);
 

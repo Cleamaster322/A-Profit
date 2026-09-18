@@ -77,6 +77,7 @@ from .views import (
     approve_protocol,
     cancel_protocol,
     generate_protocol_docx_file,
+    preview_protocol_pdf_file,
 )
 
 urlpatterns = [
@@ -155,6 +156,7 @@ urlpatterns = [
     path('protocols/<int:pk>/delete/', protocol_access_required(delete_protocol)),
     path('protocols/<int:protocol_id>/full/', protocol_access_required(get_full_protocol)),
     path('protocols/<int:protocol_id>/generate-docx/', protocol_access_required(generate_protocol_docx_file)),
+    path('protocols/<int:protocol_id>/preview-pdf/', protocol_access_required(preview_protocol_pdf_file)),
 
     # =========================================================
     # --- MEASUREMENT ---

@@ -60,6 +60,7 @@ from .serializers import (
     UpdateUserSerializer,
 )
 from .services.test_docx import generate_protocol_docx
+from .services.protocol_pdf import cleanup_pdf_preview, convert_docx_to_pdf
 from .word_utils import create_car_word_doc
 
 
@@ -236,14 +237,7 @@ class ProtocolAccessPermission(BasePermission):
             return is_protocol_reviewer_or_superuser_request(request)
 
         if path.endswith('/start-editing'):
-            return (
-                protocol.status not in {'approved', 'cancelled'}
-                and (
-                    protocol.locked_by_id is None
-                    or protocol.locked_by_id == request.user.id
-                    or is_protocol_lock_expired(protocol)
-                )
-            )
+            return protocol.status not in {'approved', 'cancelled'}
 
         if path.endswith('/generate-docx') or request.method == 'GET':
             return True
@@ -1403,12 +1397,17 @@ def get_all_protocols(request):
         if is_measurer_request(request):
             queryset = queryset.filter(user_id=request.user.id)
 
+        if user_has_role(request.user, 'operator'):
+            queryset = queryset.filter(status__in=['operator', 'revision'])
+
         user_id = request.GET.get('user_id')
         if user_id:
             queryset = queryset.filter(user_id=user_id)
 
         status_value = request.GET.get('status')
         if status_value:
+            if user_has_role(request.user, 'operator'):
+                queryset = queryset.filter(status__in=['operator', 'revision'])
             queryset = queryset.filter(status=status_value)
 
         car_id = request.GET.get('car_id')
@@ -2886,4 +2885,48 @@ def generate_protocol_docx_file(request, protocol_id):
         )
     except Exception:
         logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def preview_protocol_pdf_file(request, protocol_id):
+    temp_dir = None
+
+    try:
+        protocol = Protocol.objects.filter(pk=protocol_id).first()
+        if not protocol:
+            return Response(
+                {'error': 'Protocol not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        docx_path = generate_protocol_docx(protocol)
+        temp_dir, pdf_path = convert_docx_to_pdf(docx_path)
+
+        response = FileResponse(
+            open(pdf_path, 'rb'),
+            as_attachment=False,
+            filename=f'protocol_{protocol.id}.pdf',
+            content_type='application/pdf',
+        )
+        response._resource_closers.append(
+            lambda: cleanup_pdf_preview(temp_dir)
+        )
+        return response
+    except FileNotFoundError as error:
+        if temp_dir:
+            cleanup_pdf_preview(temp_dir)
+        logger.warning('Protocol PDF preview is unavailable: %s', error)
+        return Response(
+            {'error': 'Предпросмотр PDF недоступен: установите LibreOffice на сервере.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        if temp_dir:
+            cleanup_pdf_preview(temp_dir)
+        logger.exception('Unhandled exception in protocol PDF preview')
         return internal_server_error()

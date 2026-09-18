@@ -1,7 +1,8 @@
-import {useEffect, useMemo, useState} from "react";
+import {useCallback, useEffect, useMemo, useState} from "react";
 import {useNavigate} from "react-router-dom";
 import api from "../../shared/api.jsx";
 import {baseURL} from "../../shared/config.jsx";
+import {getApiErrorMessage} from "../../shared/errorHandler.jsx";
 
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -348,7 +349,7 @@ function ProtocolList({
 
     const showReviewActions = statuses.includes("review");
 
-    const loadProtocols = async (options = {}) => {
+    const loadProtocols = useCallback(async (options = {}) => {
         const {silent = false} = options;
 
         try {
@@ -376,22 +377,22 @@ function ProtocolList({
             setProtocols(filteredByStatus);
         } catch (err) {
             console.error(err);
-            setError("Не удалось загрузить протоколы");
+            setError(getApiErrorMessage(err, "Не удалось загрузить протоколы"));
         } finally {
             if (!silent) {
                 setLoading(false);
             }
         }
-    };
+    }, [statuses]);
 
-    const loadCurrentUser = async () => {
+    const loadCurrentUser = useCallback(async () => {
         try {
             const response = await api.get("/cars/get-user/");
             setCurrentUser(response.data);
         } catch (error) {
             console.error("Ошибка загрузки текущего пользователя:", error);
         }
-    };
+    }, []);
 
     useEffect(() => {
         loadCurrentUser();
@@ -411,7 +412,7 @@ function ProtocolList({
             clearTimeout(refreshTimer);
             window.removeEventListener("focus", handleWindowFocus);
         };
-    }, []);
+    }, [loadCurrentUser, loadProtocols]);
 
     useEffect(() => {
         let socket = null;
@@ -607,9 +608,7 @@ function ProtocolList({
             console.error("Ошибка освобождения протокола:", error);
 
             alert(
-                error.response?.data?.detail ||
-                error.response?.data?.error ||
-                "Не удалось освободить протокол"
+                getApiErrorMessage(error, "Не удалось освободить протокол")
             );
         }
     };
@@ -633,9 +632,7 @@ function ProtocolList({
             console.error("Ошибка утверждения протокола:", error);
 
             alert(
-                error.response?.data?.detail ||
-                error.response?.data?.error ||
-                "Не удалось утвердить протокол"
+                getApiErrorMessage(error, "Не удалось утвердить протокол")
             );
         }
     };
@@ -659,9 +656,7 @@ function ProtocolList({
             console.error("Ошибка возврата протокола на доработку:", error);
 
             alert(
-                error.response?.data?.detail ||
-                error.response?.data?.error ||
-                "Не удалось вернуть протокол на доработку"
+                getApiErrorMessage(error, "Не удалось вернуть протокол на доработку")
             );
         }
     };

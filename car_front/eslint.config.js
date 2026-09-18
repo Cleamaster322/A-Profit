@@ -30,4 +30,10 @@ export default [
       ],
     },
   },
+  {
+    files: ['tests/e2e/**/*.js', 'playwright*.js'],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
 ]

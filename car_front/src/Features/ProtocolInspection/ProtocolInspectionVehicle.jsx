@@ -69,7 +69,7 @@ function ProtocolInspectionVehicle({
             </Grid>
 
             <Grid container spacing={2} sx={{mb: 2}}>
-                {renderField({
+                {!measurementMode && renderField({
                     form,
                     handleChange,
                     textFieldSx,
@@ -85,11 +85,11 @@ function ProtocolInspectionVehicle({
                     textFieldSx,
                     label: "Пробег, км",
                     name: "mileage_km",
-                    md: 4,
+                    md: measurementMode ? 12 : 4,
                     placeholder: "35000",
                 })}
 
-                {renderField({
+                {!measurementMode && renderField({
                     form,
                     handleChange,
                     textFieldSx,

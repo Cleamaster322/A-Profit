@@ -5,6 +5,7 @@ import "dayjs/locale/ru";
 
 import AppHeader from "../Features/AppHeader/AppHeader.jsx";
 import api from "../shared/api.jsx";
+import {getApiErrorMessage} from "../shared/errorHandler.jsx";
 
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
@@ -18,51 +19,13 @@ import Typography from "@mui/material/Typography";
 import {AdapterDayjs} from "@mui/x-date-pickers/AdapterDayjs";
 import {DatePicker} from "@mui/x-date-pickers/DatePicker";
 import {LocalizationProvider} from "@mui/x-date-pickers/LocalizationProvider";
+import {commonSx} from "../theme.js";
 
-const pageSx = {
-    minHeight: "calc(100vh - 56px)",
-    bgcolor: "#f2f2f2",
-    px: 3,
-    py: 3,
-};
-
-const pageInnerSx = {
-    minHeight: "calc(100vh - 112px)",
-    border: "2px solid black",
-    borderRadius: 0,
-    p: 3,
-    bgcolor: "#f2f2f2",
-    boxShadow: "none",
-};
-
-const cardSx = {
-    border: "2px solid black",
-    borderRadius: 0,
-    bgcolor: "white",
-    boxShadow: "none",
-};
-
-const buttonSx = {
-    bgcolor: "black",
-    color: "white",
-    borderRadius: 0,
-    textTransform: "none",
-    fontWeight: 800,
-    px: 2.5,
-    py: 1,
-    boxShadow: "none",
-    "&:hover": {
-        bgcolor: "#222",
-        boxShadow: "none",
-    },
-};
-
-const configurationChipSx = {
-    borderRadius: 0,
-    bgcolor: "#eeeeee",
-    color: "black",
-    fontWeight: 500,
-};
+const pageSx = commonSx.page;
+const pageInnerSx = commonSx.pageInner;
+const cardSx = commonSx.card;
+const buttonSx = commonSx.primaryButton;
+const configurationChipSx = commonSx.pill;
 
 function getGenerationImageUrl(generation) {
     if (generation?.image_url) {
@@ -228,10 +191,7 @@ function ProtocolVehicleSelection() {
                 setSelectedConfiguration(data.configuration || null);
             } catch (requestError) {
                 console.error("Ошибка загрузки выбора автомобиля:", requestError);
-                setError(
-                    requestError.response?.data?.detail ||
-                    "Не удалось открыть выбор автомобиля"
-                );
+                setError(getApiErrorMessage(requestError, "Не удалось открыть выбор автомобиля"));
             } finally {
                 setLoading(false);
             }
@@ -557,8 +517,8 @@ function ProtocolVehicleSelection() {
                     </Paper>
 
                     <Box sx={{display: "flex", gap: 1, mb: 2, flexWrap: "wrap"}}>
-                        <Chip label={protocol?.brand_name || "Марка"} sx={{borderRadius: 0, bgcolor: "black", color: "white", fontWeight: 800}} />
-                        <Chip label={protocol?.commercial_name || "Модель"} sx={{borderRadius: 0, bgcolor: "white", border: "1px solid black", fontWeight: 800}} />
+                        <Chip label={protocol?.brand_name || "Марка"} sx={commonSx.inversePill} />
+                        <Chip label={protocol?.commercial_name || "Модель"} sx={commonSx.outlinePill} />
                     </Box>
 
                     {Object.entries(groupedGenerations).map(([region, regionGenerations]) => (
@@ -647,17 +607,7 @@ function ProtocolVehicleSelection() {
                                         setSelectedConfiguration(null);
                                         setError("");
                                     }}
-                                    sx={{
-                                        borderColor: "black",
-                                        color: "black",
-                                        borderRadius: 0,
-                                        textTransform: "none",
-                                        fontWeight: 700,
-                                        "&:hover": {
-                                            borderColor: "black",
-                                            bgcolor: "#eeeeee",
-                                        },
-                                    }}
+                                    sx={commonSx.secondaryButton}
                                 >
                                     Сбросить фильтры
                                 </Button>
@@ -700,7 +650,7 @@ function ProtocolVehicleSelection() {
                                             }));
                                             setSelectedConfiguration(null);
                                         }}
-                                        sx={{bgcolor: "white"}}
+                                        sx={commonSx.field}
                                     >
                                         <MenuItem value="">Все</MenuItem>
                                         {(options || []).map((option) => (

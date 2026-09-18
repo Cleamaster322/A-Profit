@@ -1,6 +1,7 @@
-import {useEffect, useRef, useState} from "react";
+import {useCallback, useEffect, useRef, useState} from "react";
 import {useLocation, useNavigate, useParams} from "react-router-dom";
 import api from "../shared/api.jsx";
+import {getApiErrorMessage} from "../shared/errorHandler.jsx";
 
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -1356,35 +1357,7 @@ function ProtocolInspection({measurementMode = false}) {
         }));
     };
 
-    const releaseProtocolLock = async () => {
-        if (!currentProtocolId) {
-            return;
-        }
-
-        if (!protocolLockActiveRef.current) {
-            return;
-        }
-
-        if (["approved", "cancelled"].includes(formStatusRef.current)) {
-            return;
-        }
-
-        try {
-            protocolLockActiveRef.current = false;
-
-            await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
-
-            await loadProtocol(currentProtocolId);
-        } catch (error) {
-            console.error("Ошибка освобождения протокола:", error);
-
-            protocolLockActiveRef.current = true;
-
-            throw error;
-        }
-    };
-
-    const releaseProtocolLockOnUnload = () => {
+    const releaseProtocolLockOnUnload = useCallback(() => {
         if (!currentProtocolId) {
             return;
         }
@@ -1419,9 +1392,9 @@ function ProtocolInspection({measurementMode = false}) {
         } catch (error) {
             console.error("Ошибка отправки keepalive-запроса при закрытии вкладки:", error);
         }
-    };
+    }, [currentProtocolId]);
 
-    const loadProtocol = async (
+    const loadProtocol = useCallback(async (
         protocolId = currentProtocolId,
         options = {}
     ) => {
@@ -1470,12 +1443,40 @@ function ProtocolInspection({measurementMode = false}) {
                     }`
                 );
             } else {
-                setErrorMessage("Не удалось загрузить данные протокола");
+                setErrorMessage(getApiErrorMessage(error, "Не удалось загрузить данные протокола"));
             }
         } finally {
             setLoading(false);
         }
-    };
+    }, [currentProtocolId]);
+
+    const releaseProtocolLock = useCallback(async () => {
+        if (!currentProtocolId) {
+            return;
+        }
+
+        if (!protocolLockActiveRef.current) {
+            return;
+        }
+
+        if (["approved", "cancelled"].includes(formStatusRef.current)) {
+            return;
+        }
+
+        try {
+            protocolLockActiveRef.current = false;
+
+            await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
+
+            await loadProtocol(currentProtocolId);
+        } catch (error) {
+            console.error("Ошибка освобождения протокола:", error);
+
+            protocolLockActiveRef.current = true;
+
+            throw error;
+        }
+    }, [currentProtocolId, loadProtocol]);
 
     useEffect(() => {
         if (id) {
@@ -1483,7 +1484,7 @@ function ProtocolInspection({measurementMode = false}) {
         } else {
             setErrorMessage("Не передан ID протокола");
         }
-    }, [id]);
+    }, [id, loadProtocol]);
 
     useEffect(() => {
         if (!location.state?.openDataReview || !form.configuration_id) {
@@ -1523,7 +1524,7 @@ function ProtocolInspection({measurementMode = false}) {
                 console.error("Ошибка освобождения протокола при переходе со страницы:", error);
             });
         };
-    }, [currentProtocolId]);
+    }, [currentProtocolId, releaseProtocolLock]);
 
     useEffect(() => {
         const handlePageHide = () => {
@@ -1541,7 +1542,7 @@ function ProtocolInspection({measurementMode = false}) {
             window.removeEventListener("pagehide", handlePageHide);
             window.removeEventListener("beforeunload", handleBeforeUnload);
         };
-    }, [currentProtocolId]);
+    }, [currentProtocolId, releaseProtocolLockOnUnload]);
 
     useEffect(() => {
         if (!currentProtocolId) {
@@ -1815,6 +1816,50 @@ function ProtocolInspection({measurementMode = false}) {
         }
     };
 
+    const handlePreviewPdf = async () => {
+        if (!currentProtocolId) {
+            setErrorMessage("Сначала сохраните протокол");
+            return;
+        }
+
+        const previewWindow = window.open("about:blank", "_blank");
+
+        if (!previewWindow) {
+            setErrorMessage("Браузер заблокировал новую вкладку предпросмотра");
+            return;
+        }
+
+        const saved = await handleSave({
+            showSuccessMessage: false,
+        });
+
+        if (!saved) {
+            previewWindow.close();
+            return;
+        }
+
+        try {
+            setErrorMessage("");
+            setSuccessMessage("Данные сохранены, формируется предпросмотр PDF...");
+
+            const response = await api.previewProtocolPdf(currentProtocolId);
+            const blob = new Blob([response.data], {type: "application/pdf"});
+            const url = window.URL.createObjectURL(blob);
+
+            previewWindow.location.href = url;
+            window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+            setSuccessMessage("Предпросмотр PDF открыт в новой вкладке");
+        } catch (error) {
+            console.error("Ошибка предпросмотра PDF:", error);
+            previewWindow.close();
+            setErrorMessage(
+                error.response?.status === 503
+                    ? "Предпросмотр недоступен: LibreOffice не установлен на сервере"
+                    : "Не удалось открыть предпросмотр PDF"
+            );
+        }
+    };
+
     const commonSectionProps = {
         form,
         handleChange,
@@ -1907,6 +1952,28 @@ function ProtocolInspection({measurementMode = false}) {
                 },
             }}
         >
+            {!measurementMode && <Button
+                variant="contained"
+                onClick={handlePreviewPdf}
+                disabled={!currentProtocolId || saving || loading}
+                sx={{
+                    bgcolor: "black",
+                    color: "white",
+                    borderRadius: 0,
+                    textTransform: "none",
+                    px: 3,
+                    py: 1,
+                    fontWeight: 800,
+                    boxShadow: "none",
+                    "&:hover": {
+                        bgcolor: "#222",
+                        boxShadow: "none",
+                    },
+                }}
+            >
+                {saving ? "Сохранение..." : "Предпросмотр PDF"}
+            </Button>}
+
             {!measurementMode && <Button
                 variant="outlined"
                 onClick={handleGenerateDocx}

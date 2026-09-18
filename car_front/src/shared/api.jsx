@@ -240,6 +240,16 @@ class ApiClient {
         );
     }
 
+    previewProtocolPdf(protocolId) {
+        return this.client.post(
+            `/cars/protocols/${protocolId}/preview-pdf/`,
+            {},
+            {
+                responseType: "blob",
+            }
+        );
+    }
+
     approveProtocol(protocolId) {
         return this.post(`/cars/protocols/${protocolId}/approve/`);
     }
