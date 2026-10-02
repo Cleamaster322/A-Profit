@@ -3,6 +3,7 @@ from pathlib import Path
 from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 
+from .applicability import build_applicability_values
 from .calculations import (
     build_calculated_values,
     build_uncertainty_values,
@@ -13,7 +14,6 @@ from .labels import (
     CYLINDER_LAYOUT_LABELS,
     ENGINE_LAYOUT_LABELS,
     FUEL_TYPE_LABELS,
-    HEADLIGHT_TYPE_LABELS,
     PARKING_BRAKE_LABELS,
     SERVICE_BRAKE_LABELS,
     STEERING_BOOSTER_LABELS,
@@ -228,9 +228,15 @@ def uncertainty_with_unit_or_dash(is_applicable, value, uncertainty, unit=""):
     return uncertainty
 
 
-def build_full_result_text(is_applicable, conclusion, requirement_text=None, result_text=None):
+def build_full_result_text(
+    is_applicable,
+    conclusion,
+    requirement_text=None,
+    result_text=None,
+    not_applicable_text=None,
+):
     if not is_applicable:
-        return "-"
+        return not_applicable_text or "-"
 
     parts = []
 
@@ -248,9 +254,15 @@ def build_full_result_text(is_applicable, conclusion, requirement_text=None, res
     return "\n".join(parts)
 
 
-def build_tire_depth_result_text(is_applicable, conclusion, requirement_text, values):
+def build_tire_depth_result_text(
+    is_applicable,
+    conclusion,
+    requirement_text,
+    values,
+    not_applicable_text=None,
+):
     if not is_applicable:
-        return "-"
+        return not_applicable_text or "-"
 
     parts = []
 
@@ -273,7 +285,27 @@ def build_tire_depth_result_text(is_applicable, conclusion, requirement_text, va
 # статус + заключение
 # =========================
 
-def make_result(is_applicable, conclusion):
+NOT_APPLICABLE_MESSAGES = {
+    "result_a_3_2": "не применяется (пункт Постановления Правительства)",
+    "result_a_6_5": "не применяется (ТС не оснащено противоугонным устройством, блокирующим рулевое управление)",
+    "result_a_8_7": "не применяется (в ТС отсутствует адаптивная система переднего освещения)",
+    "result_a_8_10_3": "не применяется (в ТС отсутствуют передние противотуманные фары)",
+    "result_a_8_20_3": "не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотренно конструкцией))",
+    "result_a_8_20_8": "не применяется (в ТС отсутствуют передние противотуманные фары)",
+    "result_a_8_24_1": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
+    "result_a_8_24_2": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
+    "result_a_8_24_3": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
+    "result_a_8_25": "не применяется (в ТС отсутствуют стояночные огни)",
+    "result_a_8_27": "не применяется (в ТС отсутствуют дневные ходовые огни)",
+    "result_a_10_5": "не применяется (на ТС установлены летние шины)",
+    "result_a_10_6": "не применяется (на ТС установлены шины без шипов)",
+    "result_a_16_17": "не применяется (на ТС отсутствуют подножки и ступеньки)",
+    "result_a_18_5": "не применяется (на ТС отсутствует складывающаяся крыша)",
+    "result_a_26_12": "не применяется (на ТС отсутствует запасное колесо)",
+}
+
+
+def make_result(is_applicable, conclusion, not_applicable_message=None):
     """
     Общее правило для подсказок вида:
     "Соответствует/не применяется".
@@ -289,11 +321,19 @@ def make_result(is_applicable, conclusion):
     if is_applicable:
         return "соответствует", conclusion
 
-    return "не применяется", "-"
+    return not_applicable_message or "не применяется", "-"
 
 
 def add_result_pair(context, key_prefix, is_applicable, conclusion):
-    status, conclusion_value = make_result(is_applicable, conclusion)
+    not_applicable_message = NOT_APPLICABLE_MESSAGES.get(key_prefix)
+    if key_prefix.startswith("result_a_22_5_"):
+        not_applicable_message = "не применяется (ТС не оборудовано газобалонным оборудованием)"
+
+    status, conclusion_value = make_result(
+        is_applicable,
+        conclusion,
+        not_applicable_message,
+    )
 
     context[f"{key_prefix}_status"] = status
     context[f"{key_prefix}_conclusion"] = conclusion_value
@@ -308,7 +348,7 @@ def add_direct_result_pair(context, key_prefix, status, conclusion):
     """
     context[f"{key_prefix}_status"] = status
 
-    if status in ["не применяется", "не указано"]:
+    if status.startswith("не применяется") or status.startswith("не указано"):
         context[f"{key_prefix}_conclusion"] = "-"
     else:
         context[f"{key_prefix}_conclusion"] = conclusion
@@ -537,7 +577,8 @@ def build_dynamic_result_values(protocol, measurement, light):
     has_spikes = getattr(protocol, "has_spikes", None)
 
     front_fog_present = is_positive_count(getattr(light, "front_fog_count", None))
-    rear_fog_present = is_positive_count(getattr(light, "rear_fog_count", None))
+    rear_fog_count = getattr(light, "rear_fog_count", None)
+    rear_fog_present = is_positive_count(rear_fog_count)
     daytime_running_present = is_positive_count(
         getattr(light, "daytime_running_light_count", None)
     )
@@ -586,12 +627,32 @@ def build_dynamic_result_values(protocol, measurement, light):
     )
 
     # А.8.13.1 — задние ПТФ
-    add_result_pair(
-        values,
-        "result_a_8_13_1",
-        rear_fog_present,
-        CONCLUSIONS["a_8_13_1"],
-    )
+    if rear_fog_count == 1:
+        add_result_pair(
+            values,
+            "result_a_8_13_1",
+            True,
+            CONCLUSIONS["a_8_13_1"],
+        )
+    elif rear_fog_count is None:
+        add_direct_result_pair(
+            values,
+            "result_a_8_13_1",
+            "не указано",
+            "-",
+        )
+    else:
+        reason = (
+            "в ТС отсутствуют задние противотуманные фонари"
+            if rear_fog_count == 0
+            else "в ТС имеется два задних противотуманных фонаря"
+        )
+        add_direct_result_pair(
+            values,
+            "result_a_8_13_1",
+            f"не применяется ({reason})",
+            "-",
+        )
 
     # А.8.20.3 — омыватели фар
     add_result_pair(
@@ -677,28 +738,88 @@ def build_dynamic_result_values(protocol, measurement, light):
         CONCLUSIONS["a_18_5"],
     )
 
-    # А.21.7–А.21.9 — экология, дымность и пробег.
+    # А.21.7–А.21.9 — сначала исключаем неподходящий тип двигателя,
+    # затем проверяем минимальный пробег.
     mileage = decimal_value(getattr(measurement, "mileage_km", None))
 
-    if mileage is None:
+    if fuel_type == "diesel":
+        add_direct_result_pair(
+            values,
+            "result_a_21_7",
+            "не применяется (ТС оборудовано дизельным двигателем)",
+            "-",
+        )
+    elif fuel_type == "electric":
+        add_direct_result_pair(
+            values,
+            "result_a_21_7",
+            "не применяется (ТС оборудовано только электродвигателем)",
+            "-",
+        )
+    elif mileage is None:
+        add_direct_result_pair(values, "result_a_21_7", "не указано", "-")
+    elif mileage < 3000:
+        add_direct_result_pair(
+            values,
+            "result_a_21_7",
+            "не применяется (пробег ТС менее 3000 км)",
+            "-",
+        )
+    elif is_fuel_petrol_like(fuel_type):
+        add_result_pair(
+            values,
+            "result_a_21_7",
+            True,
+            CONCLUSIONS["a_21_7"],
+        )
+    else:
+        add_direct_result_pair(values, "result_a_21_7", "не указано", "-")
+
+    if is_fuel_petrol_like(fuel_type):
+        add_direct_result_pair(
+            values,
+            "result_a_21_8",
+            "не применяется (ТС оборудовано бензиновым двигателем)",
+            "-",
+        )
+    elif fuel_type == "electric":
+        add_direct_result_pair(
+            values,
+            "result_a_21_8",
+            "не применяется (ТС оборудовано только электродвигателем)",
+            "-",
+        )
+    elif mileage is None:
+        add_direct_result_pair(values, "result_a_21_8", "не указано", "-")
+    elif mileage < 3000:
+        add_direct_result_pair(
+            values,
+            "result_a_21_8",
+            "не применяется (пробег ТС менее 3000 км)",
+            "-",
+        )
+    elif is_fuel_diesel(fuel_type):
+        add_result_pair(
+            values,
+            "result_a_21_8",
+            True,
+            CONCLUSIONS["a_21_8"],
+        )
+    else:
+        add_direct_result_pair(values, "result_a_21_8", "не указано", "-")
+
+    if fuel_type == "electric":
+        add_direct_result_pair(
+            values,
+            "result_a_21_9",
+            "не применяется (ТС оборудовано только электродвигателем)",
+            "-",
+        )
+    elif mileage is None:
         add_direct_result_pair(
             values,
             "result_a_21_9",
             "не указано",
-            "-",
-        )
-
-        add_direct_result_pair(
-            values,
-            "result_a_21_7",
-            "не применяется",
-            "-",
-        )
-
-        add_direct_result_pair(
-            values,
-            "result_a_21_8",
-            "не применяется",
             "-",
         )
 
@@ -710,78 +831,21 @@ def build_dynamic_result_values(protocol, measurement, light):
             "-",
         )
 
-        add_direct_result_pair(
-            values,
-            "result_a_21_7",
-            "не применяется",
-            "-",
-        )
-
-        add_direct_result_pair(
-            values,
-            "result_a_21_8",
-            "не применяется",
-            "-",
-        )
-
     else:
         add_direct_result_pair(
             values,
             "result_a_21_9",
-            f"более 3000 км. Пробег: {fmt_num(mileage, 0)} км",
+            f"не менее 3000 км. Пробег: {fmt_num(mileage, 0)} км",
             CONCLUSIONS["a_21_9"],
         )
-
-        if is_fuel_petrol_like(fuel_type):
-            add_result_pair(
-                values,
-                "result_a_21_7",
-                True,
-                CONCLUSIONS["a_21_7"],
-            )
-
-            add_direct_result_pair(
-                values,
-                "result_a_21_8",
-                "не применяется",
-                "-",
-            )
-
-        elif is_fuel_diesel(fuel_type):
-            add_direct_result_pair(
-                values,
-                "result_a_21_7",
-                "не применяется",
-                "-",
-            )
-
+        if is_fuel_diesel(fuel_type):
             average = calc_light_absorption_average(measurement)
-
-            if average is not None:
-                status = f"{fmt_num(average, 3)} м-1"
-            else:
-                status = "соответствует"
-
+            status = f"{fmt_num(average, 3)} м-1" if average is not None else "соответствует"
             add_direct_result_pair(
                 values,
                 "result_a_21_8",
                 status,
                 CONCLUSIONS["a_21_8"],
-            )
-
-        else:
-            add_direct_result_pair(
-                values,
-                "result_a_21_7",
-                "не применяется",
-                "-",
-            )
-
-            add_direct_result_pair(
-                values,
-                "result_a_21_8",
-                "не применяется",
-                "-",
             )
 
     # А.22.5.* — газобаллонное оборудование.
@@ -1082,6 +1146,7 @@ def build_front_fog_values(light):
             "не более 400 мм",
             f"Левая {left_distance} ± {left_distance_u}\n"
             f"Правая {right_distance} ± {right_distance_u}",
+              not_applicable_text="не применяется (в ТС отсутствуют передние противотуманные фары)",
         ),
 
         "full_result_a_8_10_2": build_full_result_text(
@@ -1092,11 +1157,13 @@ def build_front_fog_values(light):
             f"Левая верхняя граница: {upper_point} ± {upper_point_u}\n"
             f"Правая нижняя граница: {lower_point} ± {lower_point_u}\n"
             f"Правая верхняя граница: {upper_point} ± {upper_point_u}",
+                not_applicable_text="не применяется (в ТС отсутствуют передние противотуманные фары)",
         ),
 
         "full_result_a_8_10_3": build_full_result_text(
             front_fog_present,
             CONCLUSIONS["a_8_10_3"],
+                not_applicable_text="не применяется (в ТС отсутствуют передние противотуманные фары)",
         ),
     }
 
@@ -1153,6 +1220,7 @@ def build_rear_fog_values(light):
             "не менее 250 мм и не более 1000 мм",
             f"Верхняя граница: {upper_point} ± {upper_point_u}\n"
             f"Нижняя граница: {lower_point} ± {lower_point_u}",
+              not_applicable_text="не применяется (в ТС отсутствуют задние противотуманные фонари)",
         ),
     }
 
@@ -1235,6 +1303,7 @@ def build_tire_depth_values(protocol, measurement):
                 ("Заднее левое", winter_rl, winter_u_rl),
                 ("Заднее правое", winter_rr, winter_u_rr),
             ],
+                not_applicable_text="не применяется (на ТС установлены летние шины)",
         ),
     }
 
@@ -1281,15 +1350,35 @@ def build_eco_values(protocol, measurement):
     co_applicable = mileage_is_3000_or_more and is_fuel_petrol_like(fuel_type)
     diesel_applicable = mileage_is_3000_or_more and is_fuel_diesel(fuel_type)
 
+    if fuel_type == "diesel":
+        co_not_applicable_text = "не применяется (ТС оборудовано дизельным двигателем)"
+    elif fuel_type == "electric":
+        co_not_applicable_text = "не применяется (ТС оборудовано только электродвигателем)"
+    elif mileage is not None and mileage < 3000:
+        co_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
+    else:
+        co_not_applicable_text = None
+
+    if is_fuel_petrol_like(fuel_type):
+        diesel_not_applicable_text = "не применяется (ТС оборудовано бензиновым двигателем)"
+    elif fuel_type == "electric":
+        diesel_not_applicable_text = "не применяется (ТС оборудовано только электродвигателем)"
+    elif mileage is not None and mileage < 3000:
+        diesel_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
+    else:
+        diesel_not_applicable_text = None
+
     co_min = getattr(measurement, "co_min_pct", None)
     co_max = getattr(measurement, "co_max_pct", None)
 
     light_absorption_average = calc_light_absorption_average(measurement)
 
-    if mileage is None:
+    if fuel_type == "electric":
+        mileage_21_9 = "не применяется (ТС оборудовано только электродвигателем)"
+    elif mileage is None:
         mileage_21_9 = "не указано"
     elif mileage >= 3000:
-        mileage_21_9 = "более 3000 км"
+        mileage_21_9 = "не менее 3000 км"
     else:
         mileage_21_9 = "менее 3000 км"
 
@@ -1343,6 +1432,7 @@ def build_eco_values(protocol, measurement):
             "Минимальная - не более 0,3 %\nПовышенная - не более 0,2 %",
             f"Минимальная - {result_with_uncertainty_if_applicable(co_applicable, co_min, '0,19', 2, '%')}\n"
             f"Повышенная - {result_with_uncertainty_if_applicable(co_applicable, co_max, '0,19', 2, '%')}",
+            co_not_applicable_text,
         ),
 
         # А.21.8 — дымность дизеля
@@ -1381,11 +1471,18 @@ def build_eco_values(protocol, measurement):
                 3,
                 "м-1",
             ),
+            diesel_not_applicable_text,
         ),
 
         # А.21.9 — пробег
         "mileage_21_9": mileage_21_9,
-        "full_result_a_21_9": CONCLUSIONS["a_21_9"] if mileage is not None and mileage >= 3000 else "-",
+        "full_result_a_21_9": (
+            CONCLUSIONS["a_21_9"]
+            if fuel_type != "electric" and mileage is not None and mileage >= 3000
+            else "не применяется (ТС оборудовано только электродвигателем)"
+            if fuel_type == "electric"
+            else "-"
+        ),
     }
 
 
@@ -1448,6 +1545,7 @@ def build_protocol_docx_context(protocol):
         # =========================
         "protocol_number": fmt_text(protocol.protocol_number),
         "protocol_date": fmt_date(protocol.protocol_date),
+        "protocol_page_count": "",
 
         # =========================
         # Таблица 1.1
@@ -1797,10 +1895,6 @@ def build_protocol_docx_context(protocol):
             getattr(light, "adaptive_front_lighting_color", None)
         ),
 
-        "headlight_type_label": label(
-            HEADLIGHT_TYPE_LABELS,
-            getattr(light, "headlight_type", None),
-        ),
         "headlight_washer_present_label": fmt_bool(
             getattr(light, "headlight_washer_present", None),
             "Наличие",
@@ -1894,10 +1988,19 @@ def build_protocol_docx_context(protocol):
     context.update(build_front_fog_values(light))
     context.update(build_rear_fog_values(light))
     context.update(build_sun_strip_values(measurement))
-    context.update(build_dynamic_result_values(protocol, measurement, light))
+    dynamic_result_values = build_dynamic_result_values(protocol, measurement, light)
+    context.update(dynamic_result_values)
     context.update(build_light_device_row_values(light))
     context.update(build_calculated_values(protocol))
     context.update(build_uncertainty_values(protocol))
     context.update(build_photo_values(protocol))
+    context.update(
+        build_applicability_values(
+            protocol,
+            measurement,
+            light,
+            context,
+        )
+    )
 
     return context

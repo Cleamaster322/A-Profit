@@ -1784,12 +1784,68 @@ def select_protocol_configuration(request, pk):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            car_data = CarData.objects.filter(configuration_id=configuration.id).first()
+            car_data = (
+                CarData.objects
+                .select_related(
+                    'configuration',
+                    'configuration__generation',
+                    'configuration__generation__model',
+                    'configuration__generation__model__brand',
+                )
+                .filter(configuration_id=configuration.id)
+                .first()
+            )
             protocol.generation = generation
             protocol.configuration = configuration
             protocol.car = car_data
             protocol.manufacture_date = manufacture_date_value
-            protocol.save(update_fields=['generation', 'configuration', 'car', 'manufacture_date'])
+            protocol_update_fields = ['generation', 'configuration', 'car', 'manufacture_date']
+
+            if car_data:
+                defaults = ProtocolCreateSerializer().get_car_data_defaults(car_data)
+                protocol_dash_fields = set(protocol.dash_fields or [])
+                for field_name, value in defaults['protocol'].items():
+                    if (
+                        field_name not in protocol_dash_fields
+                        and value is not None
+                        and getattr(protocol, field_name) in (None, '')
+                    ):
+                        setattr(protocol, field_name, value)
+                        protocol_update_fields.append(field_name)
+
+                measurement, _ = ProtocolMeasurement.objects.get_or_create(
+                    protocol=protocol,
+                )
+                measurement_dash_fields = set(measurement.dash_fields or [])
+                measurement_update_fields = []
+                for field_name, value in defaults['measurement'].items():
+                    if (
+                        field_name not in measurement_dash_fields
+                        and value is not None
+                        and getattr(measurement, field_name) in (None, '')
+                    ):
+                        setattr(measurement, field_name, value)
+                        measurement_update_fields.append(field_name)
+                if measurement_update_fields:
+                    measurement.save(update_fields=measurement_update_fields)
+
+                brake, _ = ProtocolBrake.objects.get_or_create(
+                    protocol=protocol,
+                )
+                brake_dash_fields = set(brake.dash_fields or [])
+                brake_update_fields = []
+                for field_name, value in defaults['brake'].items():
+                    if (
+                        field_name not in brake_dash_fields
+                        and value is not None
+                        and getattr(brake, field_name) in (None, '')
+                    ):
+                        setattr(brake, field_name, value)
+                        brake_update_fields.append(field_name)
+                if brake_update_fields:
+                    brake.save(update_fields=brake_update_fields)
+
+            protocol.save(update_fields=protocol_update_fields)
 
         return Response(ProtocolSerializer(protocol).data)
 
@@ -2875,12 +2931,19 @@ def generate_protocol_docx_file(request, protocol_id):
         if not user_can_access_protocol(request, protocol):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
-        file_path = generate_protocol_docx(protocol)
+        template_variant = request.data.get('template', 'old')
+        try:
+            file_path = generate_protocol_docx(protocol, template_variant)
+        except ValueError as error:
+            return Response(
+                {'error': str(error)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return FileResponse(
             open(file_path, 'rb'),
             as_attachment=True,
-            filename=f'protocol_{protocol.id}.docx',
+            filename=file_path.name,
             content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         )
     except Exception:

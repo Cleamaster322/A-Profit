@@ -14,16 +14,16 @@ function ProtocolInspectionLightsMain({
                                           subsectionTitleSx,
                                       }) {
     const lightPairs = [
-        ["Фара дальнего света", "high_beam_count", "high_beam_color"],
-        ["Передняя ПТФ", "front_fog_count", "front_fog_color"],
-        ["Фонарь заднего хода", "reverse_light_count", "reverse_light_color"],
-        ["Сигнал торможения дополнительный", "additional_brake_signal_count", "additional_brake_signal_color"],
-        ["Задний ПТФ", "rear_fog_count", "rear_fog_color"],
-        ["Подсветка госномера", "plate_light_count", "plate_light_color"],
-        ["ДХО", "daytime_running_light_count", "daytime_running_light_color"],
-        ["Стояночные огни передние", "parking_light_count", "parking_light_color"],
-        ["Стояночные огни задние", "rear_parking_light_count", "rear_parking_light_color"],
-        ["Адаптивная система переднего освещения", "adaptive_front_lighting_count", "adaptive_front_lighting_color"],
+        ["Фара дальнего света", "high_beam_count", "high_beam_color", [2, 4]],
+        ["Передняя ПТФ", "front_fog_count", "front_fog_color", [2]],
+        ["Фонарь заднего хода", "reverse_light_count", "reverse_light_color", [1, 2]],
+        ["Сигнал торможения дополнительный", "additional_brake_signal_count", "additional_brake_signal_color", [1, 2]],
+        ["Задний ПТФ", "rear_fog_count", "rear_fog_color", [1, 2]],
+        ["Подсветка госномера", "plate_light_count", "plate_light_color", [1, 2]],
+        ["ДХО", "daytime_running_light_count", "daytime_running_light_color", [2]],
+        ["Стояночные огни передние", "parking_light_count", "parking_light_color", [2]],
+        ["Стояночные огни задние", "rear_parking_light_count", "rear_parking_light_color", [2]],
+        ["Адаптивная система переднего освещения", "adaptive_front_lighting_count", "adaptive_front_lighting_color", [2]],
     ];
 
     return (
@@ -36,7 +36,7 @@ function ProtocolInspectionLightsMain({
                 Внешние световые приборы
             </Typography>
 
-            {lightPairs.map(([title, countName, colorName]) =>
+            {lightPairs.map(([title, countName, colorName, countOptions]) =>
                 renderLightPair({
                     form,
                     handleChange,
@@ -44,6 +44,8 @@ function ProtocolInspectionLightsMain({
                     title,
                     countName,
                     colorName,
+                    countOptions,
+                    showColor: colorName === "front_fog_color",
                 })
             )}
 
@@ -54,19 +56,6 @@ function ProtocolInspectionLightsMain({
             </Typography>
 
             <Grid container spacing={2} sx={{mb: 3}}>
-                {renderSelect({
-                    form,
-                    handleChange,
-                    selectFieldSx,
-                    label: "Тип фар",
-                    name: "headlight_type",
-                    md: 4,
-                    options: [
-                        {value: "halogen", label: "Галоген"},
-                        {value: "xenon", label: "Ксенон"},
-                        {value: "led", label: "LED"},
-                    ],
-                })}
                 {renderSelect({
                     form,
                     handleChange,

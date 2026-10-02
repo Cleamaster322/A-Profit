@@ -53,13 +53,6 @@ TIRE_SEASON_LABELS = {
     "winter": "Зима",
 }
 
-HEADLIGHT_TYPE_LABELS = {
-    "halogen": "Галоген",
-    "xenon": "Ксенон",
-    "led": "LED",
-    "other": "Другое",
-}
-
 FUEL_TANK_MEASURE_LABELS = {
     "fixed_cap": "Несъемная крышка",
     "structural_elements": "Элементы конструкции",

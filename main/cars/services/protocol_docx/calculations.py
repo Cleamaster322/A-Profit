@@ -234,6 +234,45 @@ def calc_light_absorption_average(measurement):
     return sum(values) / Decimal(len(values))
 
 
+def standard_uncertainty_type_a(values):
+    """Type A standard uncertainty of the mean for repeated measurements."""
+    values = [decimal_value(value) for value in values]
+    values = [value for value in values if value is not None]
+
+    if len(values) < 2:
+        return None
+
+    mean = sum(values) / Decimal(len(values))
+    squared_deviations = sum((value - mean) ** 2 for value in values)
+    count = Decimal(len(values))
+
+    return (squared_deviations / (count * (count - Decimal("1")))).sqrt()
+
+
+def calc_light_absorption_uncertainty(measurement):
+    """Expanded uncertainty from type A and type B components.
+
+    The updated workbook uses six repeated readings when available:
+    uA = sqrt(sum((xi - mean)^2) / (n * (n - 1)))
+    uB = sqrt((0.05 / sqrt(3))^2 + (0.001 / (2 * sqrt(3)))^2)
+    U = 1.65 * sqrt(uA^2 + uB^2)
+    """
+    values = [
+        get_value(measurement, f"light_absorption_{index}")
+        for index in range(1, 7)
+    ]
+    type_a = standard_uncertainty_type_a(values)
+    type_b_instrument = standard_uncertainty_from_abs_error(Decimal("0.05"))
+    type_b_resolution = Decimal("0.001") / (Decimal("2") * SQRT_3)
+    type_b = root_sum_squares(type_b_instrument, type_b_resolution)
+
+    if type_a is None:
+        return expanded_from_standard(type_b)
+
+    combined = root_sum_squares(type_a, type_b)
+    return expanded_from_standard(combined)
+
+
 def build_calculated_values(protocol):
     measurement = get_related_safe(protocol, "measurement")
     brake = get_related_safe(protocol, "brake")
@@ -271,7 +310,11 @@ def u_noise_db():
     Δ = ±0.5 дБА
     U = 1.65 * 0.5 / sqrt(3) = 0.476 ≈ 0.5 дБА
     """
-    return expanded_uncertainty_from_abs_error(Decimal("0.5"))
+    standard_u = root_sum_squares(
+        standard_uncertainty_from_abs_error(Decimal("0.5")),
+        Decimal("0.1") / (Decimal("2") * SQRT_3),
+    )
+    return expanded_from_standard(standard_u)
 
 
 def u_steering_backlash_deg():
@@ -280,7 +323,11 @@ def u_steering_backlash_deg():
     Δ = ±0.5°
     U = 1.65 * 0.5 / sqrt(3) = 0.476 ≈ 0.5°
     """
-    return expanded_uncertainty_from_abs_error(Decimal("0.5"))
+    standard_u = root_sum_squares(
+        standard_uncertainty_from_abs_error(Decimal("0.5")),
+        Decimal("0.1") / (Decimal("2") * SQRT_3),
+    )
+    return expanded_from_standard(standard_u)
 
 
 def linear_abs_error_by_value_mm(value):
@@ -466,7 +513,11 @@ def u_glass_transparency_pct():
     Δ = ±2.0 %
     U = 1.65 * 2.0 / sqrt(3) = 1.905 ≈ 2.0 %
     """
-    return expanded_uncertainty_from_abs_error(Decimal("2.0"))
+    standard_u = root_sum_squares(
+        standard_uncertainty_from_abs_error(Decimal("2.0")),
+        Decimal("0.1") / (Decimal("2") * SQRT_3),
+    )
+    return expanded_from_standard(standard_u)
 
 
 def u_speed_kmh(value):
@@ -486,7 +537,11 @@ def u_speed_kmh(value):
     u = 20 * 0.15 / (100 * sqrt(3)) = 0.0173
     U = 1.65 * 0.0173 = 0.0286 ≈ 0.03 км/ч
     """
-    return expanded_uncertainty_from_relative_error(value, Decimal("0.15"))
+    standard_u = root_sum_squares(
+        standard_uncertainty_from_relative_error(value, Decimal("0.15")),
+        Decimal("0.1") / (Decimal("2") * SQRT_3),
+    )
+    return expanded_from_standard(standard_u)
 
 
 def u_turn_signal_frequency_hz():
@@ -495,7 +550,9 @@ def u_turn_signal_frequency_hz():
     Δ = ±0.1 Гц
     U = 1.65 * 0.1 / sqrt(3) = 0.095 ≈ 0.1 Гц
     """
-    return expanded_uncertainty_from_abs_error(Decimal("0.1"))
+    instrument = Decimal("0.1") / SQRT_3
+    resolution = Decimal("0.1") / (Decimal("2") * SQRT_3)
+    return expanded_from_standard(root_sum_squares(instrument, resolution))
 
 
 def u_turn_signal_frequency_per_min():
@@ -545,7 +602,11 @@ def u_vehicle_height_mm(value):
     Неопределенность габаритной высоты ТС.
     Средство измерения: рулетка RGK R-5.
     """
-    return u_rgk_r5_vehicle_mm(value)
+    standard_u = root_sum_squares(
+        standard_uncertainty_from_abs_error(Decimal("2")),
+        Decimal("1") / (Decimal("2") * SQRT_3),
+    )
+    return expanded_from_standard(standard_u)
 
 
 def u_scale_kg():
@@ -554,7 +615,11 @@ def u_scale_kg():
     Δ = ±5 кг
     U = 1.65 * 5 / sqrt(3) = 4.763 ≈ 5 кг
     """
-    return expanded_uncertainty_from_abs_error(Decimal("5"))
+    standard_u = root_sum_squares(
+        standard_uncertainty_from_abs_error(Decimal("5")),
+        Decimal("5") / (Decimal("2") * SQRT_3),
+    )
+    return expanded_from_standard(standard_u)
 
 
 def u_stand_load_kg(value):
@@ -564,7 +629,7 @@ def u_stand_load_kg(value):
 
     U = 1.65 * ((value * 3 / 100) / sqrt(3))
     """
-    return expanded_uncertainty_from_relative_error(value, Decimal("3"))
+    return expanded_from_standard(standard_stand_load_kg(value))
 
 
 # =========================
@@ -578,7 +643,18 @@ def u_brake_force_kn(value):
     Относительная погрешность ±3%.
     Значение тормозной силы хранится в кН.
     """
-    return standard_uncertainty_from_relative_error(value, Decimal("3"))
+    return standard_brake_force_kn(value)
+
+
+def standard_brake_force_kn(value):
+    """Standard uncertainty of a brake force including 10 N resolution."""
+    value = decimal_value(value)
+    if value is None:
+        return None
+
+    relative = standard_uncertainty_from_relative_error(value, Decimal("3"))
+    resolution = Decimal("0.01") / (Decimal("2") * SQRT_3)
+    return root_sum_squares(relative, resolution)
 
 
 def u_stand_load_standard_kg(value):
@@ -587,7 +663,18 @@ def u_stand_load_standard_kg(value):
 
     Погрешность стенда по нагрузке ±3%.
     """
-    return standard_uncertainty_from_relative_error(value, Decimal("3"))
+    return standard_stand_load_kg(value)
+
+
+def standard_stand_load_kg(value):
+    """Standard uncertainty of a stand load including 1 kg resolution."""
+    value = decimal_value(value)
+    if value is None:
+        return None
+
+    relative = standard_uncertainty_from_relative_error(value, Decimal("3"))
+    resolution = Decimal("1") / (Decimal("2") * SQRT_3)
+    return root_sum_squares(relative, resolution)
 
 
 def u_control_force_n(value):
@@ -606,7 +693,14 @@ def u_control_force_n(value):
     uB = 98 × 0.05 / sqrt(3) = 2.83 Н
     U = 1.65 × 2.83 = 4.67 Н
     """
-    return expanded_uncertainty_from_relative_error(value, Decimal("5"))
+    value = decimal_value(value)
+    if value is None:
+        return None
+
+    relative = standard_uncertainty_from_relative_error(value, Decimal("5"))
+    resolution = Decimal("1") / (Decimal("2") * SQRT_3)
+
+    return expanded_from_standard(root_sum_squares(relative, resolution))
 
 
 def calc_service_brake_specific_force_uncertainty(brake, measurement):
@@ -651,11 +745,11 @@ def calc_service_brake_specific_force_uncertainty(brake, measurement):
     force_sum_n = sum(forces_n)
 
     u_forces_squared_sum = sum(
-        standard_uncertainty_from_relative_error(force_n, Decimal("3")) ** 2
+        (standard_brake_force_kn(force_n / Decimal("1000")) * Decimal("1000")) ** 2
         for force_n in forces_n
     )
 
-    u_mass = standard_uncertainty_from_relative_error(mass_kg, Decimal("3"))
+    u_mass = standard_stand_load_kg(mass_kg)
 
     if u_mass is None:
         return None
@@ -698,11 +792,11 @@ def calc_parking_brake_specific_force_uncertainty(brake, measurement):
     force_sum_n = sum(forces_n)
 
     u_forces_squared_sum = sum(
-        standard_uncertainty_from_relative_error(force_n, Decimal("3")) ** 2
+        (standard_brake_force_kn(force_n / Decimal("1000")) * Decimal("1000")) ** 2
         for force_n in forces_n
     )
 
-    u_mass = standard_uncertainty_from_relative_error(mass_kg, Decimal("3"))
+    u_mass = standard_stand_load_kg(mass_kg)
 
     if u_mass is None:
         return None
@@ -789,8 +883,8 @@ def calc_brake_difference_uncertainty(left_force, right_force):
     if p_max == 0:
         return None
 
-    u_p_max = standard_uncertainty_from_relative_error(p_max, Decimal("3"))
-    u_p_min = standard_uncertainty_from_relative_error(p_min, Decimal("3"))
+    u_p_max = standard_brake_force_kn(p_max / Decimal("1000")) * Decimal("1000")
+    u_p_min = standard_brake_force_kn(p_min / Decimal("1000")) * Decimal("1000")
 
     if u_p_max is None or u_p_min is None:
         return None
@@ -824,12 +918,26 @@ def calc_axle_2_brake_difference_uncertainty(brake):
 # Сила света
 # =========================
 
+def standard_headlight_uncertainty_cd(value):
+    """Standard uncertainty for headlight intensity from the new workbook."""
+    value = decimal_value(value)
+
+    if value is None:
+        return None
+
+    relative = standard_uncertainty_from_relative_error(value, Decimal("15"))
+    resolution = Decimal("0.1") / (Decimal("2") * SQRT_3)
+
+    return root_sum_squares(relative, resolution)
+
+
 def u_headlight_cd(value):
     """
     Сила света фар.
 
     Excel:
-    относительная погрешность измерителя параметров света фар ИПФ-1 = ±15%.
+    Относительная погрешность измерителя параметров света фар ИПФ-1 = ±15%.
+    Дополнительно учитывается цена деления 0,1 кд.
 
     u = value * 15 / 100 / sqrt(3)
     U = 1.65 * u
@@ -837,7 +945,7 @@ def u_headlight_cd(value):
     Пример:
     450 кд -> 450 * 0.15 / sqrt(3) * 1.65 = 64.30 кд
     """
-    return expanded_uncertainty_from_relative_error(value, Decimal("15"))
+    return expanded_from_standard(standard_headlight_uncertainty_cd(value))
 
 
 def u_total_high_beam_cd(light):
@@ -845,8 +953,8 @@ def u_total_high_beam_cd(light):
     Неопределенность максимальной силы света всех фар дальнего света.
 
     Excel:
-    u_left = left_high_beam_cd * 15 / 100 / sqrt(3)
-    u_right = right_high_beam_cd * 15 / 100 / sqrt(3)
+    u_left = sqrt((left_high_beam_cd * 15 / 100 / sqrt(3))^2 + (0.1 / (2 * sqrt(3)))^2)
+    u_right = sqrt((right_high_beam_cd * 15 / 100 / sqrt(3))^2 + (0.1 / (2 * sqrt(3)))^2)
 
     u_total = sqrt(u_left^2 + u_right^2)
     U_total = 1.65 * u_total
@@ -860,14 +968,10 @@ def u_total_high_beam_cd(light):
     standard_values = []
 
     if left is not None:
-        standard_values.append(
-            standard_uncertainty_from_relative_error(left, Decimal("15"))
-        )
+        standard_values.append(standard_headlight_uncertainty_cd(left))
 
     if right is not None:
-        standard_values.append(
-            standard_uncertainty_from_relative_error(right, Decimal("15"))
-        )
+        standard_values.append(standard_headlight_uncertainty_cd(right))
 
     standard_u = root_sum_squares(*standard_values)
 
@@ -902,7 +1006,7 @@ def build_uncertainty_values(protocol=None):
 
     turn_hz_u = u_turn_signal_frequency_hz()
     turn_per_min_u = u_turn_signal_frequency_per_min()
-    light_absorption_u = u_light_absorption_m_1()
+    light_absorption_u = calc_light_absorption_uncertainty(measurement)
 
     length_u_mm = u_vehicle_length_mm(
         get_value(measurement, "vehicle_length_mm")

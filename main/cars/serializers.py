@@ -19,6 +19,16 @@ from .models import (
     ProtocolRoadCondition,
     ProtocolPowerSupply,
 )
+from .numeric_validation import (
+    BRAKE_RANGES,
+    CONDITION_RANGES,
+    MEASUREMENT_RANGES,
+    NON_HEADLIGHT_LIGHT_COUNT_RANGES,
+    NON_HEADLIGHT_LIGHT_RANGES,
+    POWER_SUPPLY_RANGES,
+    validate_numeric_ranges,
+    tire_depth_rule,
+)
 
 
 # =========================
@@ -82,6 +92,18 @@ class DashFieldsSerializerMixin:
                 cleaned.append(field_name)
 
         return cleaned
+
+
+class NumericRangeValidationMixin:
+    numeric_range_rules = {}
+
+    def get_numeric_range_rules(self, attrs):
+        return dict(self.numeric_range_rules)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        validate_numeric_ranges(self, attrs, self.get_numeric_range_rules(attrs))
+        return attrs
 
 
 # =========================
@@ -178,12 +200,18 @@ class ConfigurationSerializer(serializers.ModelSerializer):
     seats_count = serializers.SerializerMethodField()
     engine_power_kw = serializers.SerializerMethodField()
     engine_power_hp = serializers.SerializerMethodField()
+    cylinder_layout = serializers.SerializerMethodField()
+    cylinders_count = serializers.SerializerMethodField()
     turbo_present = serializers.SerializerMethodField()
     front_tires = serializers.SerializerMethodField()
     rear_tires = serializers.SerializerMethodField()
     body_type = serializers.SerializerMethodField()
     body_mark = serializers.SerializerMethodField()
     manufacture_year = serializers.SerializerMethodField()
+    vehicle_length_mm = serializers.SerializerMethodField()
+    vehicle_width_mm = serializers.SerializerMethodField()
+    vehicle_height_mm = serializers.SerializerMethodField()
+    vehicle_weight_kg = serializers.SerializerMethodField()
 
     class Meta:
         model = Configuration
@@ -204,12 +232,18 @@ class ConfigurationSerializer(serializers.ModelSerializer):
             'seats_count',
             'engine_power_kw',
             'engine_power_hp',
+            'cylinder_layout',
+            'cylinders_count',
             'turbo_present',
             'front_tires',
             'rear_tires',
             'body_type',
             'body_mark',
             'manufacture_year',
+            'vehicle_length_mm',
+            'vehicle_width_mm',
+            'vehicle_height_mm',
+            'vehicle_weight_kg',
         ]
 
     def get_car_data(self, obj):
@@ -242,6 +276,14 @@ class ConfigurationSerializer(serializers.ModelSerializer):
     def get_engine_power_hp(self, obj):
         car_data = self.get_car_data(obj)
         return car_data.engine_power_hp if car_data else None
+
+    def get_cylinder_layout(self, obj):
+        car_data = self.get_car_data(obj)
+        return car_data.cylinder_layout if car_data else None
+
+    def get_cylinders_count(self, obj):
+        car_data = self.get_car_data(obj)
+        return car_data.cylinders_count if car_data else None
 
     def get_turbo_present(self, obj):
         car_data = self.get_car_data(obj)
@@ -277,6 +319,22 @@ class ConfigurationSerializer(serializers.ModelSerializer):
     def get_manufacture_year(self, obj):
         car_data = self.get_car_data(obj)
         return car_data.manufacture_year if car_data else None
+
+    def get_vehicle_length_mm(self, obj):
+        car_data = self.get_car_data(obj)
+        return car_data.vehicle_length_mm if car_data else None
+
+    def get_vehicle_width_mm(self, obj):
+        car_data = self.get_car_data(obj)
+        return car_data.vehicle_width_mm if car_data else None
+
+    def get_vehicle_height_mm(self, obj):
+        car_data = self.get_car_data(obj)
+        return car_data.vehicle_height_mm if car_data else None
+
+    def get_vehicle_weight_kg(self, obj):
+        car_data = self.get_car_data(obj)
+        return car_data.vehicle_weight_kg if car_data else None
 
 
 class CarDataSerializer(serializers.ModelSerializer):
@@ -414,21 +472,109 @@ class ProtocolSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer)
         return obj.cancelled_by.username
 
 
-class ProtocolMeasurementSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolMeasurementSerializer(
+    NumericRangeValidationMixin,
+    DashFieldsSerializerMixin,
+    serializers.ModelSerializer,
+):
+    numeric_range_rules = MEASUREMENT_RANGES
+
+    def get_numeric_range_rules(self, attrs):
+        rules = super().get_numeric_range_rules(attrs)
+        protocol = attrs.get("protocol")
+        if protocol is None and self.instance is not None:
+            protocol = self.instance.protocol
+        season = getattr(protocol, "tire_season", None)
+        for field_name in (
+            "tire_depth_fl_mm",
+            "tire_depth_fr_mm",
+            "tire_depth_rl_mm",
+            "tire_depth_rr_mm",
+        ):
+            rule = tire_depth_rule(field_name, season)
+            if rule is not None:
+                rules[field_name] = rule
+        return rules
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        actual_speed = attrs.get(
+            "actual_speed_kmh",
+            getattr(self.instance, "actual_speed_kmh", None),
+        )
+        speedometer_speed = attrs.get(
+            "speed_by_speedometer_kmh",
+            getattr(self.instance, "speed_by_speedometer_kmh", None),
+        )
+        if (
+            actual_speed is not None
+            and speedometer_speed is not None
+            and actual_speed >= speedometer_speed
+        ):
+            raise serializers.ValidationError({
+                "actual_speed_kmh": "Фактическая скорость должна быть меньше скорости по спидометру."
+            })
+        return attrs
+
     class Meta:
         model = ProtocolMeasurement
         fields = '__all__'
         read_only_fields = ['id']
 
 
-class ProtocolBrakeSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolBrakeSerializer(
+    NumericRangeValidationMixin,
+    DashFieldsSerializerMixin,
+    serializers.ModelSerializer,
+):
+    numeric_range_rules = BRAKE_RANGES
+
+    def get_numeric_range_rules(self, attrs):
+        rules = super().get_numeric_range_rules(attrs)
+        service_type = attrs.get(
+            "service_brake_type",
+            getattr(self.instance, "service_brake_type", None),
+        )
+        if service_type == "disc_disc":
+            difference_maxes = {"axle_1_brake_difference_pct": "20", "axle_2_brake_difference_pct": "20"}
+        elif service_type == "disc_drum":
+            difference_maxes = {"axle_1_brake_difference_pct": "20", "axle_2_brake_difference_pct": "25"}
+        else:
+            difference_maxes = {"axle_1_brake_difference_pct": "25", "axle_2_brake_difference_pct": "25"}
+        for field_name, maximum in difference_maxes.items():
+            label = "Относительная разность тормозных сил колес оси 1" if field_name.startswith("axle_1") else "Относительная разность тормозных сил колес оси 2"
+            rules[field_name] = ("0", maximum, label, "%")
+
+        parking_type = attrs.get(
+            "parking_brake_type",
+            getattr(self.instance, "parking_brake_type", None),
+        )
+        if parking_type == "mechanical_hand":
+            rules["parking_brake_control_force_n"] = (
+                "0", "392", "Усилие на ручном органе управления стояночной тормозной системой", "Н"
+            )
+        elif parking_type == "mechanical_pedal":
+            rules["parking_brake_control_force_n"] = (
+                "0", "490", "Усилие на ножном органе управления стояночной тормозной системой", "Н"
+            )
+        return rules
+
     class Meta:
         model = ProtocolBrake
         fields = '__all__'
         read_only_fields = ['id']
 
 
-class ProtocolLightSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolLightSerializer(
+    NumericRangeValidationMixin,
+    DashFieldsSerializerMixin,
+    serializers.ModelSerializer,
+):
+    numeric_range_rules = {
+        **NON_HEADLIGHT_LIGHT_COUNT_RANGES,
+        **NON_HEADLIGHT_LIGHT_RANGES,
+    }
+
     class Meta:
         model = ProtocolLight
         fields = '__all__'
@@ -492,21 +638,42 @@ class ProtocolPhotoSerializer(serializers.ModelSerializer):
         ]
 
 
-class ProtocolTestConditionSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolTestConditionSerializer(
+    NumericRangeValidationMixin,
+    DashFieldsSerializerMixin,
+    serializers.ModelSerializer,
+):
+    numeric_range_rules = CONDITION_RANGES
+
     class Meta:
         model = ProtocolTestCondition
         fields = '__all__'
         read_only_fields = ['id']
 
 
-class ProtocolRoadConditionSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolRoadConditionSerializer(
+    NumericRangeValidationMixin,
+    DashFieldsSerializerMixin,
+    serializers.ModelSerializer,
+):
+    numeric_range_rules = {
+        "road_ambient_temperature_c": CONDITION_RANGES["road_ambient_temperature_c"],
+        "road_relative_humidity_pct": CONDITION_RANGES["road_relative_humidity_pct"],
+    }
+
     class Meta:
         model = ProtocolRoadCondition
         fields = '__all__'
         read_only_fields = ['id']
 
 
-class ProtocolPowerSupplySerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolPowerSupplySerializer(
+    NumericRangeValidationMixin,
+    DashFieldsSerializerMixin,
+    serializers.ModelSerializer,
+):
+    numeric_range_rules = POWER_SUPPLY_RANGES
+
     class Meta:
         model = ProtocolPowerSupply
         fields = '__all__'
@@ -722,7 +889,7 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             return '4x2_front'
         if 'зад' in value or 'rear' in value:
             return '4x2_rear'
-        if 'полн' in value or '4wd' in value or 'awd' in value or '4x4' in value:
+        if 'полн' in value or 'full' in value or '4wd' in value or 'awd' in value or '4x4' in value:
             return '4x4'
 
         return None
@@ -757,6 +924,49 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             return 'disc_drum'
 
         return None
+
+    def get_car_data_defaults(self, car_data):
+        configuration = car_data.configuration
+        generation = configuration.generation
+        model = generation.model
+        brand = model.brand
+        body_type = (
+            self.normalize_body_mark(car_data.body_mark)
+            or car_data.body_type
+            or generation.body_type
+        )
+
+        return {
+            "protocol": {
+                "brand_name": brand.name,
+                "commercial_name": model.name,
+                "body_type": body_type,
+                "wheel_marking_front": car_data.front_tires,
+                "wheel_marking_rear": car_data.rear_tires,
+                "manufacture_year": car_data.manufacture_year,
+            },
+            "measurement": {
+                "wheel_formula": self.normalize_wheel_formula(car_data.drive_type),
+                "seats_count": car_data.seats_count,
+                "engine_model": car_data.engine_model or configuration.engine_name,
+                "engine_power_kw": car_data.engine_power_kw,
+                "fuel_type": self.normalize_fuel_type(car_data.fuel_type),
+                "cylinder_layout": self.normalize_cylinder_layout(car_data.cylinder_layout),
+                "cylinders_count": car_data.cylinders_count,
+                "turbo_present": car_data.turbo_present,
+                "transmission_type": self.normalize_transmission(car_data.transmission),
+                "vehicle_length_mm": car_data.vehicle_length_mm,
+                "vehicle_width_mm": car_data.vehicle_width_mm,
+                "vehicle_height_mm": car_data.vehicle_height_mm,
+                "vehicle_weight_kg": car_data.vehicle_weight_kg,
+            },
+            "brake": {
+                "service_brake_type": self.normalize_service_brake_type(
+                    car_data.front_brakes,
+                    car_data.rear_brakes,
+                ),
+            },
+        }
 
     def get_default_light_values(self):
         """
@@ -834,34 +1044,12 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
                     'configuration_id': 'Для выбранной комплектации не найдены данные car_data'
                 })
 
-            configuration = car_data.configuration
-            generation = configuration.generation
-            model = generation.model
-            brand = model.brand
-
+            defaults = self.get_car_data_defaults(car_data)
             validated_data['car'] = car_data
 
-            if not validated_data.get('brand_name'):
-                validated_data['brand_name'] = brand.name
-
-            if not validated_data.get('commercial_name'):
-                validated_data['commercial_name'] = model.name
-
-            normalized_body_mark = self.normalize_body_mark(car_data.body_mark)
-
-            if normalized_body_mark:
-                validated_data['body_type'] = normalized_body_mark
-            elif not validated_data.get('body_type'):
-                validated_data['body_type'] = car_data.body_type or generation.body_type
-
-            if not validated_data.get('wheel_marking_front'):
-                validated_data['wheel_marking_front'] = car_data.front_tires
-
-            if not validated_data.get('wheel_marking_rear'):
-                validated_data['wheel_marking_rear'] = car_data.rear_tires
-
-            if not validated_data.get('manufacture_year'):
-                validated_data['manufacture_year'] = car_data.manufacture_year
+            for field_name, value in defaults["protocol"].items():
+                if validated_data.get(field_name) in (None, "") and value is not None:
+                    validated_data[field_name] = value
 
         if not validated_data.get('protocol_number'):
             validated_data['protocol_number'] = f"TEMP-{uuid4().hex[:12]}"
@@ -875,43 +1063,18 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
 
         protocol.save(update_fields=['protocol_number', 'appendix_number'])
 
-        measurement_defaults = {}
-
-        if car_data:
-            measurement_defaults = {
-                'wheel_formula': self.normalize_wheel_formula(car_data.drive_type),
-                'seats_count': car_data.seats_count,
-
-                'engine_model': car_data.engine_model or configuration.engine_name,
-                'engine_power_kw': car_data.engine_power_kw,
-                'fuel_type': self.normalize_fuel_type(car_data.fuel_type),
-                'cylinder_layout': self.normalize_cylinder_layout(car_data.cylinder_layout),
-                'cylinders_count': car_data.cylinders_count,
-                'turbo_present': car_data.turbo_present,
-
-                'transmission_type': self.normalize_transmission(car_data.transmission),
-
-                'vehicle_length_mm': car_data.vehicle_length_mm,
-                'vehicle_width_mm': car_data.vehicle_width_mm,
-                'vehicle_height_mm': car_data.vehicle_height_mm,
-                'vehicle_weight_kg': car_data.vehicle_weight_kg,
-            }
+        measurement_defaults = defaults["measurement"] if car_data else {}
 
         ProtocolMeasurement.objects.create(
             protocol=protocol,
             **measurement_defaults
         )
 
-        brake_defaults = {}
-
-        if car_data:
-            service_brake_type = self.normalize_service_brake_type(
-                car_data.front_brakes,
-                car_data.rear_brakes
-            )
-
-            if service_brake_type:
-                brake_defaults['service_brake_type'] = service_brake_type
+        brake_defaults = {
+            key: value
+            for key, value in (defaults["brake"] if car_data else {}).items()
+            if value is not None
+        }
 
         ProtocolBrake.objects.create(
             protocol=protocol,

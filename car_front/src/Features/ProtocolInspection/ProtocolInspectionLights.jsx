@@ -13,19 +13,18 @@ function ProtocolInspectionLights({
   sectionTitleSx,
 }) {
   const lightPairs = [
-    ["Фара ближнего света", "low_beam_count", "low_beam_color"],
-    ["Фара дальнего света", "high_beam_count", "high_beam_color"],
-    ["Передняя ПТФ", "front_fog_count", "front_fog_color"],
-    ["Фонарь заднего хода", "reverse_light_count", "reverse_light_color"],
-    ["Указатели поворота", "turn_signal_count", "turn_signal_color"],
-    ["Передний габаритный огонь", "front_position_light_count", "front_position_light_color"],
-    ["Задний габаритный огонь", "rear_position_light_count", "rear_position_light_color"],
-    ["Сигнал торможения основной", "main_brake_signal_count", "main_brake_signal_color"],
-    ["Сигнал торможения дополнительный", "additional_brake_signal_count", "additional_brake_signal_color"],
-    ["Задний ПТФ", "rear_fog_count", "rear_fog_color"],
-    ["Подсветка госномера", "plate_light_count", "plate_light_color"],
-    ["ДХО", "daytime_running_light_count", "daytime_running_light_color"],
-    ["Стояночные огни", "parking_light_count", "parking_light_color"],
+    ["Фара дальнего света", "high_beam_count", "high_beam_color", [2, 4]],
+    ["Передняя ПТФ", "front_fog_count", "front_fog_color", [2]],
+    ["Фонарь заднего хода", "reverse_light_count", "reverse_light_color", [1, 2]],
+    ["Указатели поворота", "turn_signal_count", "turn_signal_color", [2, 4, 6]],
+    ["Передний габаритный огонь", "front_position_light_count", "front_position_light_color", [2]],
+    ["Задний габаритный огонь", "rear_position_light_count", "rear_position_light_color", [2]],
+    ["Сигнал торможения основной", "main_brake_signal_count", "main_brake_signal_color", [2]],
+    ["Сигнал торможения дополнительный", "additional_brake_signal_count", "additional_brake_signal_color", [1, 2]],
+    ["Задний ПТФ", "rear_fog_count", "rear_fog_color", [1, 2]],
+    ["Подсветка госномера", "plate_light_count", "plate_light_color", [1, 2]],
+    ["ДХО", "daytime_running_light_count", "daytime_running_light_color", [2]],
+    ["Стояночные огни", "parking_light_count", "parking_light_color", [2]],
   ];
 
   return (
@@ -34,7 +33,7 @@ function ProtocolInspectionLights({
         7. Осветительные приборы
       </Typography>
 
-      {lightPairs.map(([title, countName, colorName]) =>
+      {lightPairs.map(([title, countName, colorName, countOptions]) =>
         renderLightPair({
           form,
           handleChange,
@@ -42,26 +41,12 @@ function ProtocolInspectionLights({
           title,
           countName,
           colorName,
+          countOptions,
+          showColor: colorName === "front_fog_color",
         })
       )}
 
       <Divider sx={{ my: 3 }} />
-
-      <Grid container spacing={2} sx={{ mb: 2 }}>
-        {renderSelect({
-          form,
-          handleChange,
-          selectFieldSx,
-          label: "Тип фар",
-          name: "headlight_type",
-          md: 4,
-          options: [
-            { value: "halogen", label: "Галоген" },
-            { value: "xenon", label: "Ксенон" },
-            { value: "led", label: "LED" },
-          ],
-        })}
-      </Grid>
 
       <Grid container spacing={2} sx={{ mb: 2 }}>
         {renderField({
