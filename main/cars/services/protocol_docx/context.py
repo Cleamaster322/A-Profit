@@ -153,7 +153,7 @@ def get_tire_depth_value(protocol, value, active_season):
     if protocol.tire_season != active_season:
         return "-"
 
-    return value_with_unit_or_dash(True, value, 1)
+    return value_with_unit_or_dash(True, value, 1, "мм")
 
 
 def get_tire_depth_uncertainty(protocol, value, active_season):
@@ -288,9 +288,9 @@ def build_tire_depth_result_text(
 NOT_APPLICABLE_MESSAGES = {
     "result_a_3_2": "не применяется (пункт Постановления Правительства)",
     "result_a_6_5": "не применяется (ТС не оснащено противоугонным устройством, блокирующим рулевое управление)",
-    "result_a_8_7": "не применяется (в ТС отсутствует адаптивная система переднего освещения)",
+    "result_a_8_7": "не применяется (в фарах ТС установлены источники света отличные от описанных в п. А.8.7)",
     "result_a_8_10_3": "не применяется (в ТС отсутствуют передние противотуманные фары)",
-    "result_a_8_20_3": "не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотренно конструкцией))",
+    "result_a_8_20_3": "не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотрено конструкцией))",
     "result_a_8_20_8": "не применяется (в ТС отсутствуют передние противотуманные фары)",
     "result_a_8_24_1": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
     "result_a_8_24_2": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
@@ -592,8 +592,6 @@ def build_dynamic_result_values(protocol, measurement, light):
         getattr(light, "adaptive_front_lighting_count", None)
     )
 
-    washer_present = is_true(getattr(light, "headlight_washer_present", None))
-
     # А.3.2 — кнопка вызова экстренных оперативных служб / ГЛОНАСС
     add_result_pair(
         values,
@@ -610,11 +608,11 @@ def build_dynamic_result_values(protocol, measurement, light):
         CONCLUSIONS["a_6_5"],
     )
 
-    # А.8.7 — адаптивная система переднего освещения или омыватели фар
+    # А.8.7 — адаптивная система переднего освещения
     add_result_pair(
         values,
         "result_a_8_7",
-        adaptive_front_lighting_present or washer_present,
+        adaptive_front_lighting_present,
         CONCLUSIONS["a_8_7"],
     )
 
@@ -627,38 +625,36 @@ def build_dynamic_result_values(protocol, measurement, light):
     )
 
     # А.8.13.1 — задние ПТФ
-    if rear_fog_count == 1:
+    rear_fog_number = decimal_value(rear_fog_count)
+    if rear_fog_number == 1:
         add_result_pair(
             values,
             "result_a_8_13_1",
             True,
             CONCLUSIONS["a_8_13_1"],
         )
-    elif rear_fog_count is None:
+    elif rear_fog_number == 2:
         add_direct_result_pair(
             values,
             "result_a_8_13_1",
-            "не указано",
+            "не применяется (в ТС имеется два задних противотуманных фонаря)",
             "-",
         )
     else:
-        reason = (
-            "в ТС отсутствуют задние противотуманные фонари"
-            if rear_fog_count == 0
-            else "в ТС имеется два задних противотуманных фонаря"
-        )
         add_direct_result_pair(
             values,
             "result_a_8_13_1",
-            f"не применяется ({reason})",
+            "не применяется (в ТС отсутствуют задние противотуманные фонари)",
             "-",
         )
+    values["rear_fog_a_8_13_1_status"] = values["result_a_8_13_1_status"]
+    values["rear_fog_a_8_13_1_conclusion"] = values["result_a_8_13_1_conclusion"]
 
-    # А.8.20.3 — омыватели фар
+    # А.8.20.3 — адаптивная система переднего освещения
     add_result_pair(
         values,
         "result_a_8_20_3",
-        washer_present,
+        adaptive_front_lighting_present,
         CONCLUSIONS["a_8_20_3"],
     )
 
@@ -905,6 +901,8 @@ def build_light_device_row_values(light):
     Если count = None, "", "-", 0, то *_present = False.
     """
 
+    rear_fog_count = decimal_value(getattr(light, "rear_fog_count", None))
+
     return {
         # Общий текст заключения для строки, когда прибор есть
         "light_device_conclusion": CONCLUSIONS["a_8_1"],
@@ -999,7 +997,10 @@ def build_light_device_row_values(light):
         ),
 
         # Задние противотуманные фонари
-        "rear_fog_present": is_positive_count(getattr(light, "rear_fog_count", None)),
+        "rear_fog_present": is_positive_count(rear_fog_count),
+        "rear_fog_one_lamp_present": rear_fog_count == 1,
+        "rear_fog_two_lamps_present": rear_fog_count == 2,
+        "rear_fog_absent": not is_positive_count(rear_fog_count),
         "rear_fog_color_value": normalize_light_color(
             getattr(light, "rear_fog_color", None)
         ),
@@ -1129,42 +1130,69 @@ def build_front_fog_values(light):
         "мм",
     )
 
+    if not front_fog_present:
+        left_distance = right_distance = ""
+        left_distance_u = right_distance_u = ""
+        lower_point = upper_point = ""
+        lower_point_u = upper_point_u = ""
+
+    front_fog_absence = "не применяется (в ТС отсутствуют передние противотуманные фары)"
+    full_result_a_8_10_1 = build_full_result_text(
+        front_fog_present,
+        CONCLUSIONS["a_8_10_1"],
+        "не более 400 мм",
+        f"Левая {left_distance} ± {left_distance_u}\n"
+        f"Правая {right_distance} ± {right_distance_u}",
+        not_applicable_text=front_fog_absence,
+    )
+    full_result_a_8_10_2 = build_full_result_text(
+        front_fog_present,
+        CONCLUSIONS["a_8_10_2"],
+        "не менее 250 мм и не более 800 мм",
+        f"Левая нижняя граница: {lower_point} ± {lower_point_u}\n"
+        f"Левая верхняя граница: {upper_point} ± {upper_point_u}\n"
+        f"Правая нижняя граница: {lower_point} ± {lower_point_u}\n"
+        f"Правая верхняя граница: {upper_point} ± {upper_point_u}",
+        not_applicable_text=front_fog_absence,
+    )
+    full_result_a_8_10_3 = build_full_result_text(
+        front_fog_present,
+        CONCLUSIONS["a_8_10_3"],
+        not_applicable_text=front_fog_absence,
+    )
+
     return {
         "fog_light_left_distance_8_10_1": left_distance,
         "fog_light_right_distance_8_10_1": right_distance,
         "u_fog_light_left_distance_8_10_1": left_distance_u,
         "u_fog_light_right_distance_8_10_1": right_distance_u,
+        "front_fog_a_8_10_1_status": (
+            "соответствует" if front_fog_present else front_fog_absence
+        ),
+        "front_fog_a_8_10_1_conclusion": (
+            full_result_a_8_10_1 if front_fog_present else "-"
+        ),
 
         "fog_light_lower_point_8_10_2": lower_point,
         "fog_light_upper_point_8_10_2": upper_point,
         "u_fog_light_lower_point_8_10_2": lower_point_u,
         "u_fog_light_upper_point_8_10_2": upper_point_u,
-
-        "full_result_a_8_10_1": build_full_result_text(
-            front_fog_present,
-            CONCLUSIONS["a_8_10_1"],
-            "не более 400 мм",
-            f"Левая {left_distance} ± {left_distance_u}\n"
-            f"Правая {right_distance} ± {right_distance_u}",
-              not_applicable_text="не применяется (в ТС отсутствуют передние противотуманные фары)",
+        "front_fog_a_8_10_2_status": (
+            "соответствует" if front_fog_present else front_fog_absence
+        ),
+        "front_fog_a_8_10_2_conclusion": (
+            full_result_a_8_10_2 if front_fog_present else "-"
+        ),
+        "front_fog_a_8_10_3_status": (
+            "соответствует" if front_fog_present else front_fog_absence
+        ),
+        "front_fog_a_8_10_3_conclusion": (
+            full_result_a_8_10_3 if front_fog_present else "-"
         ),
 
-        "full_result_a_8_10_2": build_full_result_text(
-            front_fog_present,
-            CONCLUSIONS["a_8_10_2"],
-            "не менее 250 мм и не более 800 мм",
-            f"Левая нижняя граница: {lower_point} ± {lower_point_u}\n"
-            f"Левая верхняя граница: {upper_point} ± {upper_point_u}\n"
-            f"Правая нижняя граница: {lower_point} ± {lower_point_u}\n"
-            f"Правая верхняя граница: {upper_point} ± {upper_point_u}",
-                not_applicable_text="не применяется (в ТС отсутствуют передние противотуманные фары)",
-        ),
-
-        "full_result_a_8_10_3": build_full_result_text(
-            front_fog_present,
-            CONCLUSIONS["a_8_10_3"],
-                not_applicable_text="не применяется (в ТС отсутствуют передние противотуманные фары)",
-        ),
+        "full_result_a_8_10_1": full_result_a_8_10_1,
+        "full_result_a_8_10_2": full_result_a_8_10_2,
+        "full_result_a_8_10_3": full_result_a_8_10_3,
     }
 
 
@@ -1208,20 +1236,29 @@ def build_rear_fog_values(light):
         "мм",
     )
 
+    rear_fog_absence = "не применяется (в ТС отсутствуют задние противотуманные фонари)"
+    full_result_a_8_13_2 = build_full_result_text(
+        rear_fog_present,
+        CONCLUSIONS["a_8_13_2"],
+        "не менее 250 мм и не более 1000 мм",
+        f"Верхняя граница: {upper_point} ± {upper_point_u}\n"
+        f"Нижняя граница: {lower_point} ± {lower_point_u}",
+        not_applicable_text=rear_fog_absence,
+    )
+
     return {
         "rear_fog_upper_point_8_13_2": upper_point,
         "rear_fog_lower_point_8_13_2": lower_point,
         "u_rear_fog_upper_point_8_13_2": upper_point_u,
         "u_rear_fog_lower_point_8_13_2": lower_point_u,
-
-        "full_result_a_8_13_2": build_full_result_text(
-            rear_fog_present,
-            CONCLUSIONS["a_8_13_2"],
-            "не менее 250 мм и не более 1000 мм",
-            f"Верхняя граница: {upper_point} ± {upper_point_u}\n"
-            f"Нижняя граница: {lower_point} ± {lower_point_u}",
-              not_applicable_text="не применяется (в ТС отсутствуют задние противотуманные фонари)",
+        "rear_fog_a_8_13_2_status": (
+            "соответствует" if rear_fog_present else rear_fog_absence
         ),
+        "rear_fog_a_8_13_2_conclusion": (
+            full_result_a_8_13_2 if rear_fog_present else "-"
+        ),
+
+        "full_result_a_8_13_2": full_result_a_8_13_2,
     }
 
 
@@ -1238,15 +1275,15 @@ def build_tire_depth_values(protocol, measurement):
     is_summer = protocol.tire_season == "summer"
     is_winter = protocol.tire_season == "winter"
 
-    summer_fl = get_tire_depth_value(protocol, tire_depth_fl_mm, "summer")
-    summer_fr = get_tire_depth_value(protocol, tire_depth_fr_mm, "summer")
-    summer_rl = get_tire_depth_value(protocol, tire_depth_rl_mm, "summer")
-    summer_rr = get_tire_depth_value(protocol, tire_depth_rr_mm, "summer")
+    summer_fl = value_with_unit_or_dash(True, tire_depth_fl_mm, 1, "мм")
+    summer_fr = value_with_unit_or_dash(True, tire_depth_fr_mm, 1, "мм")
+    summer_rl = value_with_unit_or_dash(True, tire_depth_rl_mm, 1, "мм")
+    summer_rr = value_with_unit_or_dash(True, tire_depth_rr_mm, 1, "мм")
 
-    summer_u_fl = get_tire_depth_uncertainty(protocol, tire_depth_fl_mm, "summer")
-    summer_u_fr = get_tire_depth_uncertainty(protocol, tire_depth_fr_mm, "summer")
-    summer_u_rl = get_tire_depth_uncertainty(protocol, tire_depth_rl_mm, "summer")
-    summer_u_rr = get_tire_depth_uncertainty(protocol, tire_depth_rr_mm, "summer")
+    summer_u_fl = uncertainty_with_unit_or_dash(True, tire_depth_fl_mm, "0,05", "мм")
+    summer_u_fr = uncertainty_with_unit_or_dash(True, tire_depth_fr_mm, "0,05", "мм")
+    summer_u_rl = uncertainty_with_unit_or_dash(True, tire_depth_rl_mm, "0,05", "мм")
+    summer_u_rr = uncertainty_with_unit_or_dash(True, tire_depth_rr_mm, "0,05", "мм")
 
     winter_fl = get_tire_depth_value(protocol, tire_depth_fl_mm, "winter")
     winter_fr = get_tire_depth_value(protocol, tire_depth_fr_mm, "winter")
@@ -1260,6 +1297,8 @@ def build_tire_depth_values(protocol, measurement):
 
     return {
         # А.10.7.2 — летние шины
+        "summer_tires_present": is_summer,
+        "winter_tires_present": is_winter,
         "tire_depth_fl_10_7_2": summer_fl,
         "tire_depth_fr_10_7_2": summer_fr,
         "tire_depth_rl_10_7_2": summer_rl,
@@ -1271,7 +1310,7 @@ def build_tire_depth_values(protocol, measurement):
         "u_tire_depth_rr_10_7_2": summer_u_rr,
 
         "full_result_a_10_7_2": build_tire_depth_result_text(
-            is_summer,
+            True,
             CONCLUSIONS["a_10_7_2"],
             "не менее 1,6 мм",
             [

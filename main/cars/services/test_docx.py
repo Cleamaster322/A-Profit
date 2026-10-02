@@ -8,6 +8,7 @@ from .protocol_docx import build_protocol_docx_context, render_protocol_docx
 PROTOCOL_TEMPLATES = {
     "old": "protocol_template.docx",
     "v4": "protocol_template_v4_source.docx",
+    "v5": "protocol_template_v5_source.docx",
 }
 
 

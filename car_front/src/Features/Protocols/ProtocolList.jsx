@@ -359,15 +359,25 @@ function ProtocolList({
 
             setError("");
 
-            const response = await api.get("/cars/protocols/");
-            const data = response.data;
-
             let items = [];
 
-            if (Array.isArray(data)) {
-                items = data;
-            } else if (Array.isArray(data?.results)) {
-                items = data.results;
+            let page = 1;
+            let hasNextPage = true;
+
+            while (hasNextPage) {
+                const response = await api.get("/cars/protocols/", {
+                    params: {page, page_size: 100},
+                });
+                const data = response.data;
+
+                if (Array.isArray(data)) {
+                    items = data;
+                    break;
+                }
+
+                items.push(...(data?.results || []));
+                hasNextPage = Boolean(data?.next);
+                page += 1;
             }
 
             const filteredByStatus = items.filter((item) =>

@@ -236,6 +236,9 @@ class ProtocolAccessPermission(BasePermission):
         if path.endswith(('/manager-release-lock', '/approve', '/cancel')):
             return is_protocol_reviewer_or_superuser_request(request)
 
+        if path.endswith('/return-to-draft') and protocol.status in {'approved', 'cancelled'}:
+            return is_protocol_reviewer_or_superuser_request(request)
+
         if path.endswith('/start-editing'):
             return protocol.status not in {'approved', 'cancelled'}
 
@@ -1616,23 +1619,39 @@ def protocol_heartbeat(request, pk):
 @permission_classes([IsAuthenticated])
 def return_protocol_to_draft(request, pk):
     try:
-        protocol = Protocol.objects.filter(pk=pk).first()
+        with transaction.atomic():
+            protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
 
-        if not protocol:
-            return Response(status=status.HTTP_404_NOT_FOUND)
+            if not protocol:
+                return Response(status=status.HTTP_404_NOT_FOUND)
 
-        if not user_can_access_protocol(request, protocol):
-            return Response(status=status.HTTP_403_FORBIDDEN)
+            if not user_can_access_protocol(request, protocol):
+                return Response(status=status.HTTP_403_FORBIDDEN)
 
-        Protocol.objects.filter(
-            pk=pk,
-            locked_by_id=request.user.id,
-        ).update(
-            locked_by_id=None,
-            locked_at=None,
-        )
+            if protocol.status in {'approved', 'cancelled'}:
+                if not is_protocol_reviewer_or_superuser_request(request):
+                    return Response(status=status.HTTP_403_FORBIDDEN)
 
-        protocol.refresh_from_db()
+                protocol.status = 'operator'
+                protocol.returned_for_revision = False
+                protocol.revision_comment = None
+                protocol.cancelled_by = None
+                protocol.cancelled_at = None
+                protocol.locked_by = request.user
+                protocol.locked_at = timezone.now()
+                protocol.save(update_fields=[
+                    'status',
+                    'returned_for_revision',
+                    'revision_comment',
+                    'cancelled_by',
+                    'cancelled_at',
+                    'locked_by',
+                    'locked_at',
+                ])
+            elif protocol.locked_by_id == request.user.id:
+                protocol.locked_by = None
+                protocol.locked_at = None
+                protocol.save(update_fields=['locked_by', 'locked_at'])
 
         notify_protocol_status_changed(protocol)
 

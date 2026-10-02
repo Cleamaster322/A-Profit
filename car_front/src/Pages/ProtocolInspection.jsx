@@ -1473,6 +1473,8 @@ function ProtocolInspection({measurementMode = false}) {
             let data = response.data;
 
             if (startEditing && !["approved", "cancelled"].includes(data.status)) {
+                await api.post(`/cars/protocols/${protocolId}/start-editing/`);
+                protocolLockActiveRef.current = true;
                 response = await api.get(`/cars/protocols/${protocolId}/full/`);
                 data = response.data;
             }
@@ -1823,8 +1825,9 @@ function ProtocolInspection({measurementMode = false}) {
             return;
         }
 
+        const isFinalized = ["approved", "cancelled"].includes(form.status);
         const confirmed = window.confirm(
-            "Вернуть протокол в черновик? После этого он снова появится в списке протоколов в работе."
+            "Вернуть протокол на этап оформления оператором?"
         );
 
         if (!confirmed) {
@@ -1838,12 +1841,15 @@ function ProtocolInspection({measurementMode = false}) {
 
             await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
 
-            protocolLockActiveRef.current = false;
-            formStatusRef.current = "draft";
+            protocolLockActiveRef.current = isFinalized;
+            formStatusRef.current = isFinalized ? "operator" : "draft";
+            if (isFinalized) {
+                setForm((previous) => ({...previous, status: "operator"}));
+            }
 
             await loadProtocol(currentProtocolId);
 
-            setSuccessMessage("Протокол возвращён в черновик");
+            setSuccessMessage("Протокол возвращён на этап оформления оператором");
         } catch (error) {
             console.error("Ошибка возврата протокола в черновик:", error);
             setErrorMessage("Не удалось вернуть протокол в черновик");
@@ -1889,7 +1895,7 @@ function ProtocolInspection({measurementMode = false}) {
             window.URL.revokeObjectURL(url);
 
             setSuccessMessage(
-                `DOCX по ${templateVariant === "v4" ? "новому" : "старому"} шаблону сформирован`,
+                `DOCX по ${templateVariant === "old" ? "старому" : "новому"} шаблону сформирован`,
             );
         } catch (error) {
             console.error("Ошибка генерации DOCX:", error);
@@ -2213,7 +2219,7 @@ function ProtocolInspection({measurementMode = false}) {
                 </Button>
                 <Button
                     variant="outlined"
-                    onClick={() => handleGenerateDocx("v4")}
+                    onClick={() => handleGenerateDocx("v5")}
                     disabled={!currentProtocolId || saving || loading}
                     sx={{
                         borderColor: "#5f6b2f",
@@ -2229,7 +2235,7 @@ function ProtocolInspection({measurementMode = false}) {
                         },
                     }}
                 >
-                    {saving ? "Сохранение..." : "DOCX: новый шаблон v4"}
+                    {saving ? "Сохранение..." : "DOCX: новый шаблон v5"}
                 </Button>
             </>}
 

@@ -7,6 +7,7 @@ from unittest.mock import patch
 from django.contrib.auth.models import Group, User
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
+from docx import Document
 from rest_framework.test import APIClient
 
 from .models import (
@@ -43,12 +44,14 @@ from .services.protocol_docx.calculations import (
 from .services.test_docx import generate_protocol_docx
 from .services.protocol_docx.applicability import build_applicability_values
 from .services.protocol_docx.context import (
+	build_light_device_row_values,
 	build_dynamic_result_values,
 	build_eco_values,
 	build_front_fog_values,
 	build_rear_fog_values,
 	build_tire_depth_values,
 )
+from .services.protocol_docx.renderer import process_document_conditions
 
 
 class ProtocolWorkflowTests(TestCase):
@@ -228,6 +231,30 @@ class ProtocolWorkflowTests(TestCase):
 		self.assertEqual(response.status_code, 423)
 		self.assertEqual(response.data["locked_by_id"], self.measurer.id)
 
+	def test_superuser_can_lock_and_update_protocol(self):
+		admin = User.objects.create_superuser(
+			username="admin",
+			email="admin@example.com",
+			password="test-password",
+		)
+		self.authenticate(admin)
+
+		lock_response = self.post(
+			f"/cars/protocols/{self.protocol.id}/start-editing/"
+		)
+		self.assertEqual(lock_response.status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.locked_by_id, admin.id)
+
+		update_response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"owner_name": "Updated by admin"},
+			format="json",
+		)
+		self.assertEqual(update_response.status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.owner_name, "Updated by admin")
+
 	def test_operator_cannot_approve_protocol(self):
 		self.protocol.status = "review"
 		self.protocol.save(update_fields=["status"])
@@ -290,6 +317,56 @@ class ProtocolWorkflowTests(TestCase):
 		self.protocol.refresh_from_db()
 		self.assertIsNone(self.protocol.locked_by_id)
 		self.assertIsNone(self.protocol.locked_at)
+
+	def test_superuser_returns_approved_protocol_to_operator_and_can_edit(self):
+		self.protocol.status = "approved"
+		self.protocol.returned_for_revision = True
+		self.protocol.revision_comment = "Previously returned"
+		self.protocol.cancelled_by = self.manager
+		self.protocol.cancelled_at = timezone.now()
+		self.protocol.save(
+			update_fields=[
+				"status",
+				"returned_for_revision",
+				"revision_comment",
+				"cancelled_by",
+				"cancelled_at",
+			]
+		)
+		admin = User.objects.create_superuser(
+			username="admin-return",
+			email="admin-return@example.com",
+			password="test-password",
+		)
+		self.authenticate(admin)
+
+		response = self.post(f"/cars/protocols/{self.protocol.id}/return-to-draft/")
+
+		self.assertEqual(response.status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.status, "operator")
+		self.assertEqual(self.protocol.locked_by_id, admin.id)
+		self.assertIsNotNone(self.protocol.locked_at)
+		self.assertFalse(self.protocol.returned_for_revision)
+		self.assertIsNone(self.protocol.revision_comment)
+		self.assertIsNone(self.protocol.cancelled_by_id)
+		self.assertIsNone(self.protocol.cancelled_at)
+
+		update_response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"owner_name": "Reopened by admin"},
+			format="json",
+		)
+		self.assertEqual(update_response.status_code, 200)
+
+	def test_operator_cannot_return_approved_protocol_to_operator(self):
+		self.protocol.status = "approved"
+		self.protocol.save(update_fields=["status"])
+		self.authenticate(self.operator)
+
+		response = self.post(f"/cars/protocols/{self.protocol.id}/return-to-draft/")
+
+		self.assertEqual(response.status_code, 403)
 
 	def test_operator_list_excludes_measurement_and_review_protocols(self):
 		Protocol.objects.create(
@@ -562,7 +639,7 @@ class ProtocolWorkflowTests(TestCase):
 
 
 class ProtocolTemplateGenerationTests(SimpleTestCase):
-	def test_generator_selects_old_and_v4_templates(self):
+	def test_generator_selects_old_v4_and_v5_templates(self):
 		protocol = SimpleNamespace(id=42)
 
 		with TemporaryDirectory() as media_root:
@@ -576,15 +653,21 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 				) as render:
 					old_output = generate_protocol_docx(protocol)
 					v4_output = generate_protocol_docx(protocol, "v4")
+					v5_output = generate_protocol_docx(protocol, "v5")
 
 		self.assertEqual(old_output.name, "protocol_42_old.docx")
 		self.assertEqual(v4_output.name, "protocol_42_v4.docx")
+		self.assertEqual(v5_output.name, "protocol_42_v5.docx")
 		self.assertEqual(
 			[
 				call.kwargs["template_path"].name
 				for call in render.call_args_list
 			],
-			["protocol_template.docx", "protocol_template_v4_source.docx"],
+			[
+				"protocol_template.docx",
+				"protocol_template_v4_source.docx",
+				"protocol_template_v5_source.docx",
+			],
 		)
 
 	def test_excel_reason_placeholders_are_available_for_docx(self):
@@ -605,11 +688,103 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 
 
 class ProtocolApplicabilityTests(SimpleTestCase):
+	def test_tire_depth_1072_is_always_output_and_1073_is_winter_only(self):
+		measurement = SimpleNamespace(
+			tire_depth_fl_mm=Decimal("5.6"),
+			tire_depth_fr_mm=Decimal("5.4"),
+			tire_depth_rl_mm=Decimal("5.2"),
+			tire_depth_rr_mm=Decimal("5.0"),
+		)
+		cases = (
+			("summer", True, False),
+			("winter", False, True),
+		)
+
+		for season, summer_present, winter_present in cases:
+			with self.subTest(season=season):
+				values = build_tire_depth_values(
+					SimpleNamespace(tire_season=season),
+					measurement,
+				)
+
+				self.assertEqual(values["summer_tires_present"], summer_present)
+				self.assertEqual(values["winter_tires_present"], winter_present)
+				self.assertEqual(values["tire_depth_fl_10_7_2"], "5,6 мм")
+				self.assertIn("5,6 мм ± 0,05 мм", values["full_result_a_10_7_2"])
+
+				if season == "summer":
+					self.assertEqual(
+						values["full_result_a_10_7_3"],
+						"не применяется (на ТС установлены летние шины)",
+					)
+				else:
+					self.assertEqual(values["tire_depth_fl_10_7_3"], "5,6 мм")
+					self.assertIn("5,6 мм ± 0,05 мм", values["full_result_a_10_7_3"])
+
+	def test_front_fog_clause_8_10_1_splits_status_and_conclusion(self):
+		absent = build_front_fog_values(SimpleNamespace(front_fog_count=0))
+		self.assertEqual(
+			absent["front_fog_a_8_10_1_status"],
+			"не применяется (в ТС отсутствуют передние противотуманные фары)",
+		)
+		self.assertEqual(absent["front_fog_a_8_10_1_conclusion"], "-")
+		for field in (
+			"fog_light_left_distance_8_10_1",
+			"fog_light_right_distance_8_10_1",
+			"u_fog_light_left_distance_8_10_1",
+			"u_fog_light_right_distance_8_10_1",
+			"fog_light_lower_point_8_10_2",
+			"fog_light_upper_point_8_10_2",
+			"u_fog_light_lower_point_8_10_2",
+			"u_fog_light_upper_point_8_10_2",
+		):
+			self.assertEqual(absent[field], "")
+		for clause in ("8_10_2", "8_10_3"):
+			self.assertEqual(
+				absent[f"front_fog_a_{clause}_status"],
+				"не применяется (в ТС отсутствуют передние противотуманные фары)",
+			)
+			self.assertEqual(absent[f"front_fog_a_{clause}_conclusion"], "-")
+
+		present = build_front_fog_values(SimpleNamespace(
+			front_fog_count=2,
+			fog_light_left_distance_mm=200,
+			fog_light_right_distance_mm=210,
+		))
+		self.assertEqual(present["front_fog_a_8_10_1_status"], "соответствует")
+		self.assertIn("Результат:", present["front_fog_a_8_10_1_conclusion"])
+		self.assertIn("±", present["front_fog_a_8_10_1_conclusion"])
+		self.assertIn("Левая", present["front_fog_a_8_10_1_conclusion"])
+		self.assertIn("Правая", present["front_fog_a_8_10_1_conclusion"])
+		self.assertEqual(present["front_fog_a_8_10_2_status"], "соответствует")
+		self.assertIn("Результат:", present["front_fog_a_8_10_2_conclusion"])
+		self.assertIn("±", present["front_fog_a_8_10_2_conclusion"])
+		self.assertEqual(present["front_fog_a_8_10_3_status"], "соответствует")
+		self.assertNotEqual(present["front_fog_a_8_10_3_conclusion"], "-")
+
+	def test_rear_fog_condition_placeholders_cover_all_count_states(self):
+		cases = (
+			(None, False, False, True),
+			(0, False, False, True),
+			(1, True, False, False),
+			(2, False, True, False),
+		)
+
+		for count, one_lamp, two_lamps, absent in cases:
+			with self.subTest(rear_fog_count=count):
+				values = build_light_device_row_values(
+					SimpleNamespace(rear_fog_count=count)
+				)
+
+				self.assertEqual(values["rear_fog_one_lamp_present"], one_lamp)
+				self.assertEqual(values["rear_fog_two_lamps_present"], two_lamps)
+				self.assertEqual(values["rear_fog_absent"], absent)
+
 	def test_rear_fog_width_requirement_applies_only_to_one_lamp(self):
 		protocol = SimpleNamespace()
 		measurement = SimpleNamespace()
 		cases = (
-			(None, "не указано"),
+			(None, "не применяется (в ТС отсутствуют задние противотуманные фонари)"),
 			(0, "не применяется (в ТС отсутствуют задние противотуманные фонари)"),
 			(1, "соответствует"),
 			(2, "не применяется (в ТС имеется два задних противотуманных фонаря)"),
@@ -621,6 +796,28 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 				values = build_dynamic_result_values(protocol, measurement, light)
 
 				self.assertEqual(values["result_a_8_13_1_status"], expected)
+				self.assertEqual(values["rear_fog_a_8_13_1_status"], expected)
+				self.assertEqual(
+					values["rear_fog_a_8_13_1_conclusion"],
+					values["result_a_8_13_1_conclusion"],
+				)
+
+	def test_rear_fog_clause_8_13_2_splits_status_and_conclusion(self):
+		absent = build_rear_fog_values(SimpleNamespace(rear_fog_count=0))
+		self.assertEqual(
+			absent["rear_fog_a_8_13_2_status"],
+			"не применяется (в ТС отсутствуют задние противотуманные фонари)",
+		)
+		self.assertEqual(absent["rear_fog_a_8_13_2_conclusion"], "-")
+
+		present = build_rear_fog_values(SimpleNamespace(
+			rear_fog_count=1,
+			rear_fog_upper_point_mm=500,
+			rear_fog_lower_point_mm=400,
+		))
+		self.assertEqual(present["rear_fog_a_8_13_2_status"], "соответствует")
+		self.assertIn("Результат:", present["rear_fog_a_8_13_2_conclusion"])
+		self.assertIn("±", present["rear_fog_a_8_13_2_conclusion"])
 
 	def test_dynamic_non_applicability_statuses_use_excel_messages(self):
 		values = build_dynamic_result_values(
@@ -650,16 +847,67 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 		)
 		self.assertEqual(
 			values["result_a_8_7_status"],
-			"не применяется (в ТС отсутствует адаптивная система переднего освещения)",
+			"не применяется (в фарах ТС установлены источники света отличные от описанных в п. А.8.7)",
 		)
 		self.assertEqual(
 			values["result_a_8_20_3_status"],
-			"не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотренно конструкцией))",
+			"не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотрено конструкцией))",
 		)
 		self.assertEqual(
 			values["result_a_10_5_status"],
 			"не применяется (на ТС установлены летние шины)",
 		)
+
+	def test_a87_and_a8203_depend_only_on_adaptive_front_lighting(self):
+		protocol = SimpleNamespace()
+		measurement = SimpleNamespace()
+		cases = (
+			(None, False),
+			(0, True),
+			(2, False),
+			(2, True),
+		)
+
+		for adaptive_count, washer_present in cases:
+			with self.subTest(
+				adaptive_count=adaptive_count,
+				washer_present=washer_present,
+			):
+				light = SimpleNamespace(
+					adaptive_front_lighting_count=adaptive_count,
+					headlight_washer_present=washer_present,
+				)
+				dynamic_values = build_dynamic_result_values(
+					protocol,
+					measurement,
+					light,
+				)
+				applicability = build_applicability_values(
+					protocol,
+					measurement,
+					light,
+					dynamic_values,
+				)
+
+				expected = (
+					"соответствует"
+					if adaptive_count == 2
+					else "не применяется (в фарах ТС установлены источники света "
+					"отличные от описанных в п. А.8.7)"
+				)
+				expected_8_20_3 = (
+					"соответствует"
+					if adaptive_count == 2
+					else "не применяется (ТС не оснащено устройствами фароочистки  и "
+					"автоматическим корректирующим устройством угла наклона фар "
+					"(не предусмотрено конструкцией))"
+				)
+				self.assertEqual(dynamic_values["result_a_8_7_status"], expected)
+				self.assertEqual(applicability["applicable_8_7"], expected)
+				self.assertEqual(
+					applicability["applicable_8_20_3"],
+					expected_8_20_3,
+				)
 
 	def test_applicability_output_uses_one_key_per_clause(self):
 		protocol = SimpleNamespace(tire_season="summer", has_spikes=False)
@@ -681,6 +929,21 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			"не применяется (ТС оборудовано дизельным двигателем)",
 		)
 		self.assertEqual(
+			values["applicable_2_1"],
+			"не применяется (ТС не используется для коммерческих перевозок)",
+		)
+		self.assertEqual(values["applicable_3_3_4"], "не указано")
+		self.assertEqual(
+			values["applicable_5_1_2_2"],
+			"не применяется (ТС оборудован двухконтурной тормозной системой. "
+			"Запасная тормозная система входит в состав рабочей тормозной системы "
+			"и не оснащается независимым органом управления)",
+		)
+		self.assertEqual(
+			values["applicable_8_19"],
+			"не применяется (на ТС отсутствует светоотражающая маркировка)",
+		)
+		self.assertEqual(
 			build_applicability_values(
 				SimpleNamespace(vehicle_category="M1"),
 				SimpleNamespace(fuel_type="diesel", vehicle_weight_kg=2000),
@@ -689,7 +952,31 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			)["applicable_21_3"],
 			"не указано",
 		)
-		self.assertEqual(values["applicable_8_20_3"], "не указано")
+		self.assertEqual(
+			values["applicable_8_20_3"],
+			"не применяется (ТС не оснащено устройствами фароочистки  и "
+			"автоматическим корректирующим устройством угла наклона фар "
+			"(не предусмотрено конструкцией))",
+		)
+
+		washer_present_light = SimpleNamespace(
+			headlight_washer_present=True,
+			adaptive_front_lighting_count=2,
+		)
+		washer_present_dynamic_values = build_dynamic_result_values(
+			protocol,
+			measurement,
+			washer_present_light,
+		)
+		washer_present_values = build_applicability_values(
+			protocol,
+			measurement,
+			washer_present_light,
+			washer_present_dynamic_values,
+		)
+		self.assertEqual(washer_present_values["applicable_8_20_3"], "соответствует")
+		for clause in ("8_18_1", "8_18_2", "8_18_3", "8_18_4"):
+			self.assertEqual(values[f"applicable_{clause}"], "отсутствие")
 		self.assertIn("applicable_21_8", values)
 		self.assertFalse(any(key.startswith("not_applicable_") for key in values))
 
@@ -713,6 +1000,60 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			)["full_result_a_10_7_3"],
 			"не применяется (на ТС установлены летние шины)",
 		)
+
+
+	def test_front_fog_absence_marks_all_three_clauses_not_applicable(self):
+		expected = "не применяется (в ТС отсутствуют передние противотуманные фары)"
+
+		for count in (None, 0):
+			with self.subTest(front_fog_count=count):
+				protocol = SimpleNamespace()
+				measurement = SimpleNamespace()
+				light = SimpleNamespace(front_fog_count=count)
+				context = build_front_fog_values(light)
+				context.update(build_dynamic_result_values(protocol, measurement, light))
+
+				values = build_applicability_values(
+					protocol,
+					measurement,
+					light,
+					context,
+				)
+
+				for clause in ("8_10_1", "8_10_2", "8_10_3"):
+					self.assertEqual(values[f"applicable_{clause}"], expected)
+
+	def test_optional_lights_mark_all_screenshot_clauses_not_applicable(self):
+		expected_front_fog = (
+			"не применяется (в ТС отсутствуют передние противотуманные фары)"
+		)
+		expected_rear_fog = (
+			"не применяется (в ТС отсутствуют задние противотуманные фонари)"
+		)
+		protocol = SimpleNamespace()
+		measurement = SimpleNamespace()
+
+		for absent_count in (None, 0):
+			with self.subTest(absent_count=absent_count):
+				light = SimpleNamespace(
+					front_fog_count=absent_count,
+					rear_fog_count=absent_count,
+					turn_signal_count=absent_count,
+				)
+				context = build_front_fog_values(light)
+				context.update(build_rear_fog_values(light))
+				context.update(build_dynamic_result_values(protocol, measurement, light))
+				values = build_applicability_values(
+					protocol,
+					measurement,
+					light,
+					context,
+				)
+
+				for clause in ("8_10_1", "8_10_2", "8_10_3"):
+					self.assertEqual(values[f"applicable_{clause}"], expected_front_fog)
+				self.assertEqual(values["applicable_8_13_1"], expected_rear_fog)
+				self.assertEqual(values["applicable_8_13_2"], expected_rear_fog)
 
 	def test_eco_checks_apply_fuel_rules_and_inclusive_mileage_threshold(self):
 		protocol = SimpleNamespace()
@@ -908,3 +1249,26 @@ class ProtocolCalculationTests(TestCase):
 
 		self.assertGreater(u_steering_backlash_deg(), old_steering)
 		self.assertNotEqual(u_vehicle_height_mm(1640), old_height)
+
+
+class ProtocolDocxConditionalRowTests(SimpleTestCase):
+	def test_table_row_else_renders_only_the_matching_branch(self):
+		for condition, expected in ((True, "present"), (False, "absent")):
+			with self.subTest(condition=condition):
+				document = Document()
+			table = document.add_table(rows=5, cols=1)
+			table.cell(0, 0).text = "{%tr if front_fog_present %}"
+			table.cell(1, 0).text = "present"
+			table.cell(2, 0).text = "{%tr else %}"
+			table.cell(3, 0).text = "absent"
+			table.cell(4, 0).text = "{%tr endif %}"
+
+			process_document_conditions(
+				document,
+				{"front_fog_present": condition},
+			)
+
+			self.assertEqual(
+				[row.cells[0].text for row in document.tables[0].rows],
+				[expected],
+			)

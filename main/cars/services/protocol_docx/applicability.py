@@ -27,20 +27,19 @@ _EXCEL_REASON_OPTIONS = {
     "not_applicable_a_7_5": "не применяется (в ТС отсутствует отопитель с выхлопной трубой)",
     "not_applicable_a_7_6": "не применяется (в ТС отсутствует обогревательный прибор с камерой сгорания)",
     "not_applicable_a_8_1": "не применяется (на ТС отсутствуют(один из вариантов): фонари, огни, фары, устройства, маркировки)",
-    "not_applicable_a_8_7": "не применяется (в ТС отсутствует адаптивная система переднего освещения)",
+    "not_applicable_a_8_7": "не применяется (в фарах ТС установлены источники света отличные от описанных в п. А.8.7)",
     "not_applicable_a_8_10_1": "не применяется (в ТС отсутствуют передние противотуманные фары)",
     "not_applicable_a_8_10_2": "не применяется (в ТС отсутствуют передние противотуманные фары)",
     "not_applicable_a_8_10_3": "не применяется (в ТС отсутствуют передние противотуманные фары)",
-    "not_applicable_a_8_11": "не применяется (в ТС отсутствуют факультативные указатели поворота)",
     "not_applicable_a_8_13_1_no_lamps": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
     "not_applicable_a_8_13_1_two_lamps": "не применяется (в ТС имеется два задних противотуманных фонаря)",
     "not_applicable_a_8_13_2": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
-    "not_applicable_a_8_18_1": "В каждом из 4-х пунктов будет всегда будет отсутствие",
-    "not_applicable_a_8_18_2": "В каждом из 4-х пунктов будет всегда будет отсутствие",
-    "not_applicable_a_8_18_3": "В каждом из 4-х пунктов будет всегда будет отсутствие",
-    "not_applicable_a_8_18_4": "В каждом из 4-х пунктов будет всегда будет отсутствие",
+    "not_applicable_a_8_18_1": "отсутствие",
+    "not_applicable_a_8_18_2": "отсутствие",
+    "not_applicable_a_8_18_3": "отсутствие",
+    "not_applicable_a_8_18_4": "отсутствие",
     "not_applicable_a_8_19": "не применяется (на ТС отсутствует светоотражающая маркировка)",
-    "not_applicable_a_8_20_3": "не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотренно конструкцией))",
+    "not_applicable_a_8_20_3": "не применяется (ТС не оснащено устройствами фароочистки  и автоматическим корректирующим устройством угла наклона фар (не предусмотрено конструкцией))",
     "not_applicable_a_8_20_8": "не применяется (в ТС отсутствуют передние противотуманные фары)",
     "not_applicable_a_8_24_1": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
     "not_applicable_a_8_24_2": "не применяется (в ТС отсутствуют задние противотуманные фонари)",
@@ -165,6 +164,16 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         suffix = f"_{option}" if option else ""
         return _EXCEL_REASON_OPTIONS[f"not_applicable_{code}{suffix}"]
 
+    for reason_key, message in _EXCEL_REASON_OPTIONS.items():
+        code = reason_key.removeprefix("not_applicable_")
+        if (
+            code in _ALTERNATE_REASON_CODES
+            or not code.startswith(("a_", "stb_"))
+            or code.startswith("a_1_")
+        ):
+            continue
+        set_value(code, message)
+
     def positive_count(value):
         number = decimal_value(value)
         return number is not None and number > 0
@@ -210,9 +219,6 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         if emergency_call_present
         else reason("a_3_1_regulation"),
     )
-
-    if getattr(light, "headlight_washer_present", None) is not True:
-        set_value("a_8_20_3", "не указано")
 
     light_counts = [
         getattr(light, field, None)
