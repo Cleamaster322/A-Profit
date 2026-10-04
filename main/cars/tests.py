@@ -255,6 +255,46 @@ class ProtocolWorkflowTests(TestCase):
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.owner_name, "Updated by admin")
 
+	def test_superuser_can_update_approved_protocol_despite_foreign_lock(self):
+		self.protocol.status = "approved"
+		self.protocol.locked_by = self.other_measurer
+		self.protocol.locked_at = timezone.now()
+		self.protocol.save(update_fields=["status", "locked_by", "locked_at"])
+		admin = User.objects.create_superuser(
+			username="admin-all-rights",
+			email="admin-all-rights@example.com",
+			password="test-password",
+		)
+		self.authenticate(admin)
+
+		response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"owner_name": "Updated by full-access admin"},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.owner_name, "Updated by full-access admin")
+
+	def test_measurement_api_saves_pneumatic_suspension_presence(self):
+		ProtocolMeasurement.objects.create(protocol=self.protocol)
+		self.authenticate(self.measurer)
+		self.assertEqual(
+			self.post(f"/cars/protocols/{self.protocol.id}/start-editing/").status_code,
+			200,
+		)
+
+		response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/measurement/update/",
+			{"pneumatic_suspension_present": True},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		measurement = ProtocolMeasurement.objects.get(protocol=self.protocol)
+		self.assertTrue(measurement.pneumatic_suspension_present)
+
 	def test_operator_cannot_approve_protocol(self):
 		self.protocol.status = "review"
 		self.protocol.save(update_fields=["status"])
@@ -926,7 +966,7 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 		)
 		self.assertEqual(
 			values["applicable_21_7"],
-			"не применяется (ТС оборудовано дизельным двигателем)",
+			"не применяется (пробег ТС менее 3000 км)",
 		)
 		self.assertEqual(
 			values["applicable_2_1"],
@@ -979,6 +1019,216 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			self.assertEqual(values[f"applicable_{clause}"], "отсутствие")
 		self.assertIn("applicable_21_8", values)
 		self.assertFalse(any(key.startswith("not_applicable_") for key in values))
+
+	def test_a20_5_1_depends_only_on_electric_engine(self):
+		cases = (
+			(
+				"electric",
+				"fixed_cap",
+				"не применяется (ТС оборудовано только электродвигателем)",
+			),
+			(
+				"petrol",
+				"fixed_cap",
+				"не применяется (на ТС отсутствует несъемная крышка наливной горловины топливного бака)",
+			),
+			(
+				"diesel",
+				None,
+				"не применяется (на ТС отсутствует несъемная крышка наливной горловины топливного бака)",
+			),
+		)
+
+		for fuel_type, protection_measure, expected in cases:
+			with self.subTest(fuel_type=fuel_type, protection_measure=protection_measure):
+				values = build_applicability_values(
+					SimpleNamespace(),
+					SimpleNamespace(
+						fuel_type=fuel_type,
+						fuel_tank_leak_protection_measure=protection_measure,
+					),
+					SimpleNamespace(),
+					{},
+				)
+
+				self.assertEqual(values["applicable_20_5_1"], expected)
+
+	def test_a21_4_to_a21_6_apply_only_to_non_electric_engines(self):
+		for fuel_type in ("electric", "petrol", "diesel"):
+			with self.subTest(fuel_type=fuel_type):
+				values = build_applicability_values(
+					SimpleNamespace(),
+					SimpleNamespace(fuel_type=fuel_type),
+					SimpleNamespace(),
+					{},
+				)
+				expected = (
+					"не применяется (ТС оборудовано только электродвигателем)"
+					if fuel_type == "electric"
+					else "соответствует"
+				)
+
+				for clause in ("21_4", "21_5", "21_6"):
+					self.assertEqual(values[f"applicable_{clause}"], expected)
+
+	def test_a23_1_exposes_electric_and_numeric_docx_conditions(self):
+		for fuel_type, is_electric in (
+			("electric", True),
+			("petrol", False),
+			("diesel", False),
+			("hybrid", False),
+			(None, False),
+		):
+			with self.subTest(fuel_type=fuel_type):
+				values = build_dynamic_result_values(
+					SimpleNamespace(),
+					SimpleNamespace(fuel_type=fuel_type),
+					SimpleNamespace(),
+				)
+
+				self.assertEqual(values["a_23_1_electric"], is_electric)
+				self.assertEqual(values["a_23_1_numeric"], not is_electric)
+
+	def test_a23_2_has_separate_applicability_and_conclusion_placeholders(self):
+		protocol = SimpleNamespace()
+		light = SimpleNamespace()
+		cases = (
+			(
+				"electric",
+				"не применяется (ТС оборудовано только электродвигателем)",
+				"-",
+			),
+			(
+				"petrol",
+				"соответствует",
+				"Соответствует требованиям\nТР ТС 018/2011\nПриложения N 8 п.9.10",
+			),
+		)
+
+		for fuel_type, expected_status, expected_conclusion in cases:
+			with self.subTest(fuel_type=fuel_type):
+				measurement = SimpleNamespace(fuel_type=fuel_type)
+				context = build_dynamic_result_values(protocol, measurement, light)
+				applicability = build_applicability_values(
+					protocol,
+					measurement,
+					light,
+					context,
+				)
+
+				self.assertEqual(context["result_a_23_2_status"], expected_status)
+				self.assertEqual(
+					context["result_a_23_2_conclusion"],
+					expected_conclusion,
+				)
+				self.assertEqual(applicability["applicable_23_2"], expected_status)
+
+	def test_a24_6_has_separate_applicability_and_conclusion_placeholders(self):
+		cases = (
+			(
+				"electric",
+				"не применяется (ТС оборудовано электрической рулевой рейкой)",
+				"-",
+			),
+			(
+				"hydraulic",
+				"соответствует",
+				"Соответствует требованиям\nТР ТС 018/2011\nПриложения N 8 п.2.6",
+			),
+		)
+
+		for booster_type, expected_status, expected_conclusion in cases:
+			with self.subTest(steering_booster_type=booster_type):
+				protocol = SimpleNamespace()
+				measurement = SimpleNamespace(steering_booster_type=booster_type)
+				light = SimpleNamespace()
+				context = build_dynamic_result_values(protocol, measurement, light)
+				applicability = build_applicability_values(
+					protocol,
+					measurement,
+					light,
+					context,
+				)
+
+				self.assertEqual(context["result_a_24_6_status"], expected_status)
+				self.assertEqual(
+					context["result_a_24_6_conclusion"],
+					expected_conclusion,
+				)
+				self.assertEqual(applicability["applicable_24_6"], expected_status)
+
+	def test_a26_7_uses_pneumatic_suspension_presence(self):
+		protocol = SimpleNamespace()
+		cases = (
+			(
+				False,
+				"не применяется (на ТС отсутствует пневматическая подвеска)",
+				"-",
+			),
+			(
+				True,
+				"соответствует",
+				"Соответствует требованиям\nТР ТС 018/2011\nПриложения N 8 п.10.7",
+			),
+		)
+
+		for present, expected_status, expected_conclusion in cases:
+			with self.subTest(pneumatic_suspension_present=present):
+				measurement = SimpleNamespace(
+					pneumatic_suspension_present=present,
+				)
+				context = build_dynamic_result_values(
+					protocol,
+					measurement,
+					SimpleNamespace(),
+				)
+				applicability = build_applicability_values(
+					protocol,
+					measurement,
+					SimpleNamespace(),
+					context,
+				)
+
+				self.assertEqual(context["result_a_26_7_status"], expected_status)
+				self.assertEqual(context["result_a_26_7_conclusion"], expected_conclusion)
+				self.assertEqual(applicability["applicable_26_7"], expected_status)
+
+	def test_a20_5_2_depends_only_on_electric_engine(self):
+		cases = (
+			(
+				"electric",
+				"structural_elements",
+				"не применяется (ТС оборудовано только электродвигателем)",
+			),
+			(
+				"petrol",
+				"structural_elements",
+				"не применяется (на ТС отсутствуют элементы конструкции, "
+				"не допускающие утечки избыточных паров и топлива в случае "
+				"отсутствия крышки наливной горловины)",
+			),
+			(
+				"diesel",
+				"fixed_cap",
+				"не применяется (на ТС отсутствуют элементы конструкции, "
+				"не допускающие утечки избыточных паров и топлива в случае "
+				"отсутствия крышки наливной горловины)",
+			),
+		)
+
+		for fuel_type, protection_measure, expected in cases:
+			with self.subTest(fuel_type=fuel_type, protection_measure=protection_measure):
+				values = build_applicability_values(
+					SimpleNamespace(),
+					SimpleNamespace(
+						fuel_type=fuel_type,
+						fuel_tank_leak_protection_measure=protection_measure,
+					),
+					SimpleNamespace(),
+					{},
+				)
+
+				self.assertEqual(values["applicable_20_5_2"], expected)
 
 	def test_full_result_fields_use_excel_reasons(self):
 		self.assertEqual(
@@ -1058,10 +1308,13 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 	def test_eco_checks_apply_fuel_rules_and_inclusive_mileage_threshold(self):
 		protocol = SimpleNamespace()
 		cases = [
-			("diesel", 1000, "не применяется (ТС оборудовано дизельным двигателем)", "не применяется (пробег ТС менее 3000 км)"),
+			("diesel", 1000, "не применяется (пробег ТС менее 3000 км)", "не применяется (пробег ТС менее 3000 км)"),
 			("electric", 5000, "не применяется (ТС оборудовано только электродвигателем)", "не применяется (ТС оборудовано только электродвигателем)"),
-			("petrol", 2999, "не применяется (пробег ТС менее 3000 км)", "не применяется (ТС оборудовано бензиновым двигателем)"),
+			("petrol", 2999, "не применяется (пробег ТС менее 3000 км)", "не применяется (пробег ТС менее 3000 км)"),
 			("petrol", 3000, "соответствует", "не применяется (ТС оборудовано бензиновым двигателем)"),
+			("diesel", 3000, "не применяется (ТС оборудовано дизельным двигателем)", "соответствует"),
+			("hybrid", 3000, "соответствует", "не применяется (ТС оборудовано бензиновым двигателем)"),
+			(None, None, "соответствует", "соответствует"),
 		]
 
 		for fuel_type, mileage, co_status, smoke_status in cases:
@@ -1077,12 +1330,38 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 				self.assertEqual(values["result_a_21_7_status"], co_status)
 				self.assertEqual(values["result_a_21_8_status"], smoke_status)
 				self.assertEqual(
+					eco_values["a_21_7_low_mileage"],
+					mileage is not None and mileage < 3000,
+				)
+				self.assertEqual(
+					eco_values["a_21_7_numeric"],
+					co_status == "соответствует",
+				)
+				self.assertEqual(
+					eco_values["a_21_8_low_mileage"],
+					mileage is not None and mileage < 3000,
+				)
+				self.assertEqual(
+					eco_values["a_21_8_numeric"],
+					smoke_status == "соответствует",
+				)
+				self.assertEqual(
 					eco_values["mileage_21_9"],
 					"не применяется (ТС оборудовано только электродвигателем)"
 					if fuel_type == "electric"
-					else "не менее 3000 км"
-					if mileage >= 3000
-					else f"менее 3000 км",
+					else "более 3000 км"
+					if mileage is None or mileage >= 3000
+					else "менее 3000 км",
+				)
+				if fuel_type is None and mileage is None:
+					self.assertNotEqual(eco_values["full_result_a_21_9"], "-")
+				self.assertEqual(
+					values["result_a_21_9_status"],
+					"не применяется (ТС оборудовано только электродвигателем)"
+					if fuel_type == "electric"
+					else "более 3000 км"
+					if mileage is None or mileage >= 3000
+					else "менее 3000 км",
 				)
 
 

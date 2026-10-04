@@ -273,7 +273,6 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         )
 
     fuel_type = getattr(measurement, "fuel_type", None)
-    fuel_tank_measure = getattr(measurement, "fuel_tank_leak_protection_measure", None)
     electric = fuel_type == "electric"
     electric_only_reasons = (
         "a_20_1",
@@ -284,6 +283,9 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         "a_20_6",
         "a_20_7",
         "a_20_8",
+        "a_21_4",
+        "a_21_5",
+        "a_21_6",
         "a_22_3",
         "a_22_4",
         "a_23_1",
@@ -296,21 +298,13 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         "a_20_5_1",
         reason("a_20_5_1_electric")
         if electric
-        else reason("a_20_5_1_no_fixed_cap")
-        if fuel_tank_measure in {"structural_elements", "other_measure"}
-        else "соответствует"
-        if fuel_tank_measure == "fixed_cap"
-        else "не указано",
+        else reason("a_20_5_1_no_fixed_cap"),
     )
     set_value(
         "a_20_5_2",
         reason("a_20_5_2_electric")
         if electric
-        else "соответствует"
-        if fuel_tank_measure == "structural_elements"
-        else reason("a_20_5_2_no_vapor_protection")
-        if fuel_tank_measure == "fixed_cap"
-        else "не указано",
+        else reason("a_20_5_2_no_vapor_protection"),
     )
 
     if is_fuel_petrol_like(fuel_type):
@@ -324,16 +318,14 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
     mileage = decimal_value(getattr(measurement, "mileage_km", None))
     if electric:
         set_value("a_21_9", reason("a_21_9_electric"))
-    elif mileage is not None and mileage >= 3000:
-        set_value("a_21_9", "соответствует")
-    elif mileage is not None:
-        set_value("a_21_9", "не применяется (при пробеге менее 3000 км проверка не проводится)")
+    elif mileage is None or mileage >= 3000:
+        set_value("a_21_9", "более 3000 км")
+    else:
+        set_value("a_21_9", "менее 3000 км")
 
     category = getattr(protocol, "vehicle_category", None)
     if category in {"M1", "N1"}:
         set_value("a_11_16", reason("a_11_16"))
-    if getattr(measurement, "steering_booster_type", None) == "electric":
-        set_value("a_24_6", reason("a_24_6"))
 
     if electric:
         set_value("a_23_1", reason("a_23_1"))

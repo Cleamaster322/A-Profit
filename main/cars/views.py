@@ -208,6 +208,9 @@ def user_can_access_protocol(request, protocol):
 
 
 def user_can_edit_protocol(request, protocol):
+    if is_superuser_request(request):
+        return True
+
     return (
         request.user
         and request.user.is_authenticated
@@ -229,7 +232,13 @@ class ProtocolAccessPermission(BasePermission):
             )
 
         protocol = Protocol.objects.filter(pk=protocol_id).first()
-        if not protocol or not user_can_access_protocol(request, protocol):
+        if not protocol:
+            return False
+
+        if is_superuser_request(request):
+            return True
+
+        if not user_can_access_protocol(request, protocol):
             return False
 
         path = request.path.rstrip('/')

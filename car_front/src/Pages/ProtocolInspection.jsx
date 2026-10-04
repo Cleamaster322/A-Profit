@@ -232,6 +232,7 @@ const initialForm = {
     steering_lock_present: "",
     gas_equipment_present: "",
     glonass_button_present: "",
+    pneumatic_suspension_present: "",
 
     bumper_ends_bent_to_body: "",
     bumper_to_body_distance_mm: "",
@@ -659,6 +660,7 @@ const MEASUREMENT_MISC_FIELDS = [
     "bumper_bends_to_body",
     "bumper_to_body_distance_mm",
     "opening_roof_present",
+    "pneumatic_suspension_present",
     "fuel_tank_leak_protection_measure",
     "protruding_elements_doors_mm",
     "protruding_elements_other_mm",
@@ -1003,6 +1005,7 @@ function mapProtocolToForm(data) {
         steering_lock_present: booleanToSelect(measurement.steering_lock_present),
         gas_equipment_present: booleanToSelect(measurement.gas_equipment_present),
         glonass_button_present: booleanToSelect(measurement.glonass_button_present),
+        pneumatic_suspension_present: booleanToSelect(measurement.pneumatic_suspension_present),
 
         tire_depth_fl_mm: toFormValue(measurement.tire_depth_fl_mm, measurementDashFields, "tire_depth_fl_mm"),
         tire_depth_rl_mm: toFormValue(measurement.tire_depth_rl_mm, measurementDashFields, "tire_depth_rl_mm"),
@@ -1169,6 +1172,7 @@ function buildMeasurementPayload(form) {
         steering_lock_present: stringToBooleanOrNull(form.steering_lock_present),
         gas_equipment_present: stringToBooleanOrNull(form.gas_equipment_present),
         glonass_button_present: stringToBooleanOrNull(form.glonass_button_present),
+        pneumatic_suspension_present: stringToBooleanOrNull(form.pneumatic_suspension_present),
 
         dash_fields: buildDashFields(form, MEASUREMENT_DASH_FIELDS),
     };

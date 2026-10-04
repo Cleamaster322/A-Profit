@@ -399,6 +399,7 @@ class ProtocolMeasurement(DashFieldsMixin, models.Model):
     mufflers_count = models.IntegerField(blank=True, null=True)
     seats_count = models.CharField(max_length=50, blank=True, null=True)
     steps_present = models.BooleanField(blank=True, null=True)
+    pneumatic_suspension_present = models.BooleanField(blank=True, null=True)
 
     # Двигатель
     engine_model = models.CharField(max_length=255, blank=True, null=True)

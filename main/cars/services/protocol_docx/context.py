@@ -287,6 +287,8 @@ def build_tire_depth_result_text(
 
 NOT_APPLICABLE_MESSAGES = {
     "result_a_3_2": "не применяется (пункт Постановления Правительства)",
+    "result_a_23_2": "не применяется (ТС оборудовано только электродвигателем)",
+    "result_a_24_6": "не применяется (ТС оборудовано электрической рулевой рейкой)",
     "result_a_6_5": "не применяется (ТС не оснащено противоугонным устройством, блокирующим рулевое управление)",
     "result_a_8_7": "не применяется (в фарах ТС установлены источники света отличные от описанных в п. А.8.7)",
     "result_a_8_10_3": "не применяется (в ТС отсутствуют передние противотуманные фары)",
@@ -301,6 +303,7 @@ NOT_APPLICABLE_MESSAGES = {
     "result_a_10_6": "не применяется (на ТС установлены шины без шипов)",
     "result_a_16_17": "не применяется (на ТС отсутствуют подножки и ступеньки)",
     "result_a_18_5": "не применяется (на ТС отсутствует складывающаяся крыша)",
+    "result_a_26_7": "не применяется (на ТС отсутствует пневматическая подвеска)",
     "result_a_26_12": "не применяется (на ТС отсутствует запасное колесо)",
 }
 
@@ -500,7 +503,6 @@ CONCLUSIONS = {
         "ТР ТС 018/2011",
         "Приложения №8 п.9.1",
     ),
-
     "a_21_8": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
@@ -511,6 +513,18 @@ CONCLUSIONS = {
         "Соответствует требованиям",
         "ТР ТС 018/2011",
         "Приложения №8 п.9.3",
+    ),
+
+    "a_23_2": conclusion_text(
+        "Соответствует требованиям",
+        "ТР ТС 018/2011",
+        "Приложения N 8 п.9.10",
+    ),
+
+    "a_24_6": conclusion_text(
+        "Соответствует требованиям",
+        "ТР ТС 018/2011",
+        "Приложения N 8 п.2.6",
     ),
 
     "a_22_5_1": conclusion_text(
@@ -561,6 +575,12 @@ CONCLUSIONS = {
         "Приложения N 8 п.9.8.6.3",
     ),
 
+    "a_26_7": conclusion_text(
+        "Соответствует требованиям",
+        "ТР ТС 018/2011",
+        "Приложения N 8 п.10.7",
+    ),
+
     "a_26_12": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
@@ -591,6 +611,8 @@ def build_dynamic_result_values(protocol, measurement, light):
     adaptive_front_lighting_present = is_positive_count(
         getattr(light, "adaptive_front_lighting_count", None)
     )
+    values["a_23_1_electric"] = fuel_type == "electric"
+    values["a_23_1_numeric"] = fuel_type != "electric"
 
     # А.3.2 — кнопка вызова экстренных оперативных служб / ГЛОНАСС
     add_result_pair(
@@ -606,6 +628,22 @@ def build_dynamic_result_values(protocol, measurement, light):
         "result_a_6_5",
         is_true(getattr(measurement, "steering_lock_present", None)),
         CONCLUSIONS["a_6_5"],
+    )
+
+    # А.24.6 — электрическая рулевая рейка
+    add_result_pair(
+        values,
+        "result_a_24_6",
+        getattr(measurement, "steering_booster_type", None) != "electric",
+        CONCLUSIONS["a_24_6"],
+    )
+
+    # А.26.7 — пневматическая подвеска
+    add_result_pair(
+        values,
+        "result_a_26_7",
+        is_true(getattr(measurement, "pneumatic_suspension_present", None)),
+        CONCLUSIONS["a_26_7"],
     )
 
     # А.8.7 — адаптивная система переднего освещения
@@ -738,7 +776,16 @@ def build_dynamic_result_values(protocol, measurement, light):
     # затем проверяем минимальный пробег.
     mileage = decimal_value(getattr(measurement, "mileage_km", None))
 
-    if fuel_type == "diesel":
+    mileage_below_3000 = mileage is not None and mileage < 3000
+
+    if mileage_below_3000:
+        add_direct_result_pair(
+            values,
+            "result_a_21_7",
+            "не применяется (пробег ТС менее 3000 км)",
+            "-",
+        )
+    elif fuel_type == "diesel":
         add_direct_result_pair(
             values,
             "result_a_21_7",
@@ -752,26 +799,22 @@ def build_dynamic_result_values(protocol, measurement, light):
             "не применяется (ТС оборудовано только электродвигателем)",
             "-",
         )
-    elif mileage is None:
-        add_direct_result_pair(values, "result_a_21_7", "не указано", "-")
-    elif mileage < 3000:
-        add_direct_result_pair(
-            values,
-            "result_a_21_7",
-            "не применяется (пробег ТС менее 3000 км)",
-            "-",
-        )
-    elif is_fuel_petrol_like(fuel_type):
+    else:
         add_result_pair(
             values,
             "result_a_21_7",
             True,
             CONCLUSIONS["a_21_7"],
         )
-    else:
-        add_direct_result_pair(values, "result_a_21_7", "не указано", "-")
 
-    if is_fuel_petrol_like(fuel_type):
+    if mileage_below_3000:
+        add_direct_result_pair(
+            values,
+            "result_a_21_8",
+            "не применяется (пробег ТС менее 3000 км)",
+            "-",
+        )
+    elif is_fuel_petrol_like(fuel_type):
         add_direct_result_pair(
             values,
             "result_a_21_8",
@@ -785,24 +828,15 @@ def build_dynamic_result_values(protocol, measurement, light):
             "не применяется (ТС оборудовано только электродвигателем)",
             "-",
         )
-    elif mileage is None:
-        add_direct_result_pair(values, "result_a_21_8", "не указано", "-")
-    elif mileage < 3000:
-        add_direct_result_pair(
-            values,
-            "result_a_21_8",
-            "не применяется (пробег ТС менее 3000 км)",
-            "-",
-        )
-    elif is_fuel_diesel(fuel_type):
+    else:
         add_result_pair(
             values,
             "result_a_21_8",
             True,
             CONCLUSIONS["a_21_8"],
         )
-    else:
-        add_direct_result_pair(values, "result_a_21_8", "не указано", "-")
+
+    mileage_below_3000 = mileage is not None and mileage < 3000
 
     if fuel_type == "electric":
         add_direct_result_pair(
@@ -811,19 +845,11 @@ def build_dynamic_result_values(protocol, measurement, light):
             "не применяется (ТС оборудовано только электродвигателем)",
             "-",
         )
-    elif mileage is None:
+    elif mileage_below_3000:
         add_direct_result_pair(
             values,
             "result_a_21_9",
-            "не указано",
-            "-",
-        )
-
-    elif mileage < 3000:
-        add_direct_result_pair(
-            values,
-            "result_a_21_9",
-            f"менее 3000 км. Пробег: {fmt_num(mileage, 0)} км",
+            "менее 3000 км",
             "-",
         )
 
@@ -831,7 +857,7 @@ def build_dynamic_result_values(protocol, measurement, light):
         add_direct_result_pair(
             values,
             "result_a_21_9",
-            f"не менее 3000 км. Пробег: {fmt_num(mileage, 0)} км",
+            "более 3000 км",
             CONCLUSIONS["a_21_9"],
         )
         if is_fuel_diesel(fuel_type):
@@ -843,6 +869,14 @@ def build_dynamic_result_values(protocol, measurement, light):
                 status,
                 CONCLUSIONS["a_21_8"],
             )
+
+    # А.23.2 — изменение конструкции системы выпуска отработавших газов
+    add_result_pair(
+        values,
+        "result_a_23_2",
+        fuel_type != "electric",
+        CONCLUSIONS["a_23_2"],
+    )
 
     # А.22.5.* — газобаллонное оборудование.
     gas_equipment_present = is_true(
@@ -1384,26 +1418,29 @@ def build_eco_values(protocol, measurement):
     fuel_type = getattr(measurement, "fuel_type", None)
     mileage = decimal_value(getattr(measurement, "mileage_km", None))
 
-    mileage_is_3000_or_more = mileage is not None and mileage >= 3000
+    mileage_below_3000 = mileage is not None and mileage < 3000
 
-    co_applicable = mileage_is_3000_or_more and is_fuel_petrol_like(fuel_type)
-    diesel_applicable = mileage_is_3000_or_more and is_fuel_diesel(fuel_type)
+    co_applicable = not mileage_below_3000 and fuel_type not in {"diesel", "electric"}
+    diesel_applicable = (
+        not mileage_below_3000
+        and fuel_type not in {"petrol", "hybrid", "electric"}
+    )
 
-    if fuel_type == "diesel":
+    if mileage_below_3000:
+        co_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
+    elif fuel_type == "diesel":
         co_not_applicable_text = "не применяется (ТС оборудовано дизельным двигателем)"
     elif fuel_type == "electric":
         co_not_applicable_text = "не применяется (ТС оборудовано только электродвигателем)"
-    elif mileage is not None and mileage < 3000:
-        co_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
     else:
         co_not_applicable_text = None
 
-    if is_fuel_petrol_like(fuel_type):
+    if mileage_below_3000:
+        diesel_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
+    elif is_fuel_petrol_like(fuel_type):
         diesel_not_applicable_text = "не применяется (ТС оборудовано бензиновым двигателем)"
     elif fuel_type == "electric":
         diesel_not_applicable_text = "не применяется (ТС оборудовано только электродвигателем)"
-    elif mileage is not None and mileage < 3000:
-        diesel_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
     else:
         diesel_not_applicable_text = None
 
@@ -1414,14 +1451,21 @@ def build_eco_values(protocol, measurement):
 
     if fuel_type == "electric":
         mileage_21_9 = "не применяется (ТС оборудовано только электродвигателем)"
-    elif mileage is None:
-        mileage_21_9 = "не указано"
-    elif mileage >= 3000:
-        mileage_21_9 = "не менее 3000 км"
+    elif mileage is None or mileage >= 3000:
+        mileage_21_9 = "более 3000 км"
     else:
         mileage_21_9 = "менее 3000 км"
 
     return {
+        "a_21_7_low_mileage": mileage_below_3000,
+        "a_21_7_diesel": fuel_type == "diesel",
+        "a_21_7_electric": fuel_type == "electric",
+        "a_21_7_numeric": co_applicable,
+        "a_21_8_low_mileage": mileage_below_3000,
+        "a_21_8_petrol": is_fuel_petrol_like(fuel_type),
+        "a_21_8_electric": fuel_type == "electric",
+        "a_21_8_numeric": diesel_applicable,
+
         # А.21.7 — CO
         "co_min_21_7": value_if_applicable(co_applicable, co_min, 2),
         "co_max_21_7": value_if_applicable(co_applicable, co_max, 2),
@@ -1517,7 +1561,7 @@ def build_eco_values(protocol, measurement):
         "mileage_21_9": mileage_21_9,
         "full_result_a_21_9": (
             CONCLUSIONS["a_21_9"]
-            if fuel_type != "electric" and mileage is not None and mileage >= 3000
+            if fuel_type != "electric" and (mileage is None or mileage >= 3000)
             else "не применяется (ТС оборудовано только электродвигателем)"
             if fuel_type == "electric"
             else "-"

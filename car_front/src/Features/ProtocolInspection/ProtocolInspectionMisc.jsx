@@ -1,6 +1,8 @@
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 
 function ProtocolInspectionMisc({
@@ -60,6 +62,22 @@ function ProtocolInspectionMisc({
                         {value: "false", label: "Отсутствует"},
                     ],
                 })}
+                <Grid size={{xs: 12, md: 4}}>
+                    <FormControlLabel
+                        control={(
+                            <Checkbox
+                                checked={form.pneumatic_suspension_present === "true"}
+                                onChange={(event) => handleChange({
+                                    target: {
+                                        name: "pneumatic_suspension_present",
+                                        value: event.target.checked ? "true" : "false",
+                                    },
+                                })}
+                            />
+                        )}
+                        label="Пневматическая подвеска"
+                    />
+                </Grid>
             </Grid>
 
             <Typography variant="h6" sx={subsectionTitleSx}>
