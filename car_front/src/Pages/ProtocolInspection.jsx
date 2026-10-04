@@ -2223,7 +2223,7 @@ function ProtocolInspection({measurementMode = false}) {
                 </Button>
                 <Button
                     variant="outlined"
-                    onClick={() => handleGenerateDocx("v5")}
+                    onClick={() => handleGenerateDocx("v6")}
                     disabled={!currentProtocolId || saving || loading}
                     sx={{
                         borderColor: "#5f6b2f",
@@ -2239,7 +2239,7 @@ function ProtocolInspection({measurementMode = false}) {
                         },
                     }}
                 >
-                    {saving ? "Сохранение..." : "DOCX: новый шаблон v5"}
+                    {saving ? "Сохранение..." : "DOCX: новый шаблон v6"}
                 </Button>
             </>}
 

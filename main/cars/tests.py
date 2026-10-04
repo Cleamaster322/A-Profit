@@ -1,5 +1,7 @@
 from datetime import date
 from decimal import Decimal
+import re
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -52,6 +54,11 @@ from .services.protocol_docx.context import (
 	build_tire_depth_values,
 )
 from .services.protocol_docx.renderer import process_document_conditions
+from .services.protocol_docx.v6_placeholder_migration import (
+	add_v6_context_aliases,
+	create_v6_template,
+	load_v5_v6_mappings,
+)
 
 
 class ProtocolWorkflowTests(TestCase):
@@ -679,7 +686,7 @@ class ProtocolWorkflowTests(TestCase):
 
 
 class ProtocolTemplateGenerationTests(SimpleTestCase):
-	def test_generator_selects_old_v4_and_v5_templates(self):
+	def test_generator_selects_old_v5_and_v6_templates(self):
 		protocol = SimpleNamespace(id=42)
 
 		with TemporaryDirectory() as media_root:
@@ -692,12 +699,16 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 					side_effect=lambda template_path, output_path, context: output_path,
 				) as render:
 					old_output = generate_protocol_docx(protocol)
-					v4_output = generate_protocol_docx(protocol, "v4")
 					v5_output = generate_protocol_docx(protocol, "v5")
+					with patch(
+						"cars.services.test_docx.add_v6_context_aliases"
+					) as add_aliases:
+						v6_output = generate_protocol_docx(protocol, "v6")
+						add_aliases.assert_called_once_with({"example": "value"})
 
 		self.assertEqual(old_output.name, "protocol_42_old.docx")
-		self.assertEqual(v4_output.name, "protocol_42_v4.docx")
 		self.assertEqual(v5_output.name, "protocol_42_v5.docx")
+		self.assertEqual(v6_output.name, "protocol_42_v6.docx")
 		self.assertEqual(
 			[
 				call.kwargs["template_path"].name
@@ -705,10 +716,36 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 			],
 			[
 				"protocol_template.docx",
-				"protocol_template_v4_source.docx",
 				"protocol_template_v5_source.docx",
+				"protocol_template_v6_source.docx",
 			],
 		)
+
+	def test_v6_aliases_and_template_cover_the_rename_map(self):
+		placeholder_renames, condition_renames = load_v5_v6_mappings()
+		self.assertEqual(len(placeholder_renames), 253)
+
+		context = {name: name for name in placeholder_renames}
+		for old_tag in condition_renames:
+			match = re.fullmatch(
+				r"{%\s*tr\s+if\s+(?:not\s+)?([A-Za-z0-9_]+)\s*%}",
+				old_tag,
+			)
+			if match:
+				context.setdefault(match.group(1), False)
+		context["rear_fog_a_8_13_2_conclusion"] = "-"
+
+		add_v6_context_aliases(context)
+		self.assertEqual(context["a_8_13_2_conclusion"], "-")
+		for new_name in placeholder_renames.values():
+			self.assertIn(new_name, context)
+
+		with TemporaryDirectory() as temp_dir:
+			template_path = create_v6_template(
+				Path(temp_dir) / "protocol_template_v6_source.docx"
+			)
+			self.assertGreater(template_path.stat().st_size, 0)
+			Document(template_path)
 
 	def test_excel_reason_placeholders_are_available_for_docx(self):
 		protocol = SimpleNamespace(registration_number=None)
