@@ -2679,15 +2679,15 @@ function ProtocolInspection({measurementMode = false}) {
 
                     <Box
                         sx={{
-                            position: "sticky",
-                            bottom: 0,
+                            position: {xs: "static", md: "sticky"},
+                            bottom: {xs: "auto", md: 0},
                             display: "flex",
                             justifyContent: "flex-end",
                             mt: 2,
-                            py: 2,
+                            py: {xs: 1.5, md: 2},
                             bgcolor: "#f2f2f2",
                             borderTop: "2px solid black",
-                            zIndex: 10,
+                            zIndex: {xs: "auto", md: 10},
                         }}
                     >
                         {actionButtons}
