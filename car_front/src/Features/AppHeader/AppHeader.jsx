@@ -10,6 +10,7 @@ import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
 
 import api from "../../shared/api.jsx";
+import {baseURL} from "../../shared/config.jsx";
 
 function AppHeader({beforeNavigate}) {
     const navigate = useNavigate();
@@ -25,6 +26,11 @@ function AppHeader({beforeNavigate}) {
         currentUser?.is_superuser || currentUser?.role === "executive_director"
     );
     const isMeasurer = currentUser?.role === "measurer";
+    const isAdminUser = currentUser?.username === "admin";
+
+    const openAdminPanel = () => {
+        window.open(`${baseURL}/admin/`, "_blank", "noopener");
+    };
 
     useEffect(() => {
         let isMounted = true;
@@ -226,6 +232,12 @@ function AppHeader({beforeNavigate}) {
                         </Button>
                     )}
 
+                    {isAdminUser && (
+                        <Button onClick={openAdminPanel} sx={navButtonSx(false)}>
+                            Админ-панель
+                        </Button>
+                    )}
+
                     <Button
                         onClick={handleLogout}
                         disabled={leaving}
@@ -312,6 +324,11 @@ function AppHeader({beforeNavigate}) {
                 {canManageEmployees && (
                     <MenuItem onClick={() => handleMobileNavigate("/employees")} selected={isActive("/employees")}>
                         Сотрудники
+                    </MenuItem>
+                )}
+                {isAdminUser && (
+                    <MenuItem onClick={() => {setMobileMenuAnchor(null); openAdminPanel();}}>
+                        Админ-панель
                     </MenuItem>
                 )}
                 <MenuItem onClick={handleMobileLogout} sx={{borderTop: "1px solid #ddd", mt: 0.5, fontWeight: 700}}>

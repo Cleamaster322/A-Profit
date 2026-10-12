@@ -35,7 +35,7 @@ def env_list(name, default):
 
 ALLOWED_HOSTS = env_list(
     'DJANGO_ALLOWED_HOSTS',
-    '127.0.0.1,localhost,192.168.0.105',
+    '127.0.0.1,localhost,192.168.0.105,192.168.0.9',
 )
 
 # Application definition
@@ -58,8 +58,8 @@ INSTALLED_APPS = [
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
+        'rest_framework.authentication.SessionAuthentication',
     ],
     'EXCEPTION_HANDLER': 'cars.api_errors.exception_handler',
 }
@@ -84,7 +84,7 @@ MIDDLEWARE = [
 
 CORS_ALLOWED_ORIGINS = env_list(
     'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000,http://192.168.0.105:3000',
+    'http://localhost:3000,http://127.0.0.1:3000,http://192.168.0.105:3000,http://192.168.0.9:3000',
 )
 
 CORS_ALLOW_CREDENTIALS = True

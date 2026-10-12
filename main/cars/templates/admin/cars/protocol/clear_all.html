@@ -1,0 +1,22 @@
+{% extends "admin/base_site.html" %}
+
+{% block content %}
+<p>
+  Будут безвозвратно удалены все протоколы ({{ protocols_count }}), замеры, тормоза, свет, фото,
+  условия испытаний, а также файлы фото и сформированные документы протоколов.
+  Нумерация id во всех этих таблицах начнётся заново с 1.
+</p>
+<p>Данные парсера (марки, модели, поколения, комплектации, характеристики) не затрагиваются.</p>
+
+{% if error %}<p class="errornote">{{ error }}</p>{% endif %}
+
+<form method="post">
+  {% csrf_token %}
+  <p>
+    Для подтверждения введите <strong>{{ confirm_word }}</strong>:
+    <input type="text" name="confirm" autocomplete="off">
+  </p>
+  <input type="submit" value="Очистить" class="default">
+  <a href="{{ changelist_url }}" class="button cancel-link">Отмена</a>
+</form>
+{% endblock %}
