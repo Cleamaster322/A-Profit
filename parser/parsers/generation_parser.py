@@ -71,12 +71,19 @@ def _get_project_root() -> str:
 
 
 def _get_relative_image_path(filename: str) -> str:
-    return f"main/media/generations/{filename}"
+    return f"generations/{filename}"
 
 
 def _get_absolute_path_from_relative(relative_path: str) -> str:
     project_root = _get_project_root()
-    return os.path.join(project_root, relative_path)
+    media_root = os.path.join(project_root, "main", "media")
+
+    normalized_path = str(relative_path).replace("\\", "/")
+
+    if normalized_path.startswith("main/media/"):
+        normalized_path = normalized_path.replace("main/media/", "", 1)
+
+    return os.path.join(media_root, normalized_path)
 
 
 def _get_file_extension_from_url(image_url: str) -> str:

@@ -1,16 +1,20 @@
-from datetime import date
+import logging
+from datetime import date, timedelta
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 from django.contrib.auth.models import User
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 from django.http import FileResponse, HttpResponse
 from django.middleware.csrf import get_token
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
-from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
+from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.tokens import RefreshToken
 from pathlib import Path
 from uuid import uuid4
 
@@ -56,7 +60,18 @@ from .serializers import (
     UpdateUserSerializer,
 )
 from .services.test_docx import generate_protocol_docx
+from .services.protocol_pdf import cleanup_pdf_preview, convert_docx_to_pdf
 from .word_utils import create_car_word_doc
+
+
+logger = logging.getLogger(__name__)
+
+
+def internal_server_error():
+    return Response(
+        {'error': 'Внутренняя ошибка сервера.'},
+        status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    )
 
 
 # =========================================================
@@ -140,6 +155,15 @@ def user_has_role(user, role_name):
     return user.groups.filter(name=role_name).exists()
 
 
+def is_measurer_request(request):
+    return bool(
+        request.user
+        and request.user.is_authenticated
+        and not request.user.is_superuser
+        and user_has_role(request.user, 'measurer')
+    )
+
+
 def is_manager_or_superuser_request(request):
     return bool(
         request.user
@@ -171,6 +195,111 @@ def is_protocol_reviewer_or_superuser_request(request):
             or user_has_role(request.user, 'executive_director')
         )
     )
+
+
+def user_can_access_protocol(request, protocol):
+    if not request.user or not request.user.is_authenticated:
+        return False
+
+    if is_measurer_request(request):
+        return protocol.user_id == request.user.id
+
+    return True
+
+
+def user_can_edit_protocol(request, protocol):
+    if is_superuser_request(request):
+        return True
+
+    return (
+        request.user
+        and request.user.is_authenticated
+        and protocol.status in {'measurement', 'operator', 'revision', 'review'}
+        and protocol.locked_by_id == request.user.id
+    )
+
+
+class ProtocolAccessPermission(BasePermission):
+    def has_permission(self, request, view):
+        protocol_id = view.kwargs.get('protocol_id', view.kwargs.get('pk'))
+
+        if protocol_id is None and view.kwargs.get('photo_id') is not None:
+            protocol_id = (
+                ProtocolPhoto.objects
+                .filter(pk=view.kwargs['photo_id'])
+                .values_list('protocol_id', flat=True)
+                .first()
+            )
+
+        protocol = Protocol.objects.filter(pk=protocol_id).first()
+        if not protocol:
+            return False
+
+        if is_superuser_request(request):
+            return True
+
+        if not user_can_access_protocol(request, protocol):
+            return False
+
+        path = request.path.rstrip('/')
+        if path.endswith(('/manager-release-lock', '/approve', '/cancel')):
+            return is_protocol_reviewer_or_superuser_request(request)
+
+        if path.endswith('/return-to-draft') and protocol.status in {'approved', 'cancelled'}:
+            return is_protocol_reviewer_or_superuser_request(request)
+
+        if path.endswith('/start-editing'):
+            return protocol.status not in {'approved', 'cancelled'}
+
+        if path.endswith('/generate-docx') or request.method == 'GET':
+            return True
+
+        return user_can_edit_protocol(request, protocol)
+
+
+def protocol_access_required(view_func):
+    view_func.cls.permission_classes = [IsAuthenticated, ProtocolAccessPermission]
+    return view_func
+
+LOCK_TIMEOUT_MINUTES = 5
+
+
+def is_protocol_lock_expired(protocol):
+    if not protocol.locked_by_id:
+        return False
+
+    if not protocol.locked_at:
+        return True
+
+    return protocol.locked_at < timezone.now() - timedelta(minutes=LOCK_TIMEOUT_MINUTES)
+
+
+def clear_expired_protocol_lock(protocol):
+    protocol.locked_by = None
+    protocol.locked_at = None
+    protocol.save(update_fields=['locked_by', 'locked_at'])
+
+def release_expired_protocol_locks():
+    expiration_time = timezone.now() - timedelta(minutes=LOCK_TIMEOUT_MINUTES)
+    released_protocols = []
+
+    with transaction.atomic():
+        protocols = (
+            Protocol.objects
+            .select_for_update()
+            .exclude(status__in=['approved', 'cancelled'])
+            .exclude(locked_by__isnull=True)
+            .filter(Q(locked_at__isnull=True) | Q(locked_at__lt=expiration_time))
+        )
+
+        for protocol in protocols:
+            clear_expired_protocol_lock(protocol)
+            released_protocols.append(protocol)
+
+    for protocol in released_protocols:
+        notify_protocol_status_changed(protocol)
+
+    return len(released_protocols)
 
 def normalize_region_name(region):
     if not region:
@@ -253,8 +382,44 @@ def configuration_matches_year(configuration, year):
     return True
 
 
+def extract_month_from_drom_date(value):
+    if not value:
+        return None
+
+    value = str(value).strip()
+
+    if value in ['н.в.', 'н.в', 'present', 'now', '-']:
+        return None
+
+    parts = value.split('.')
+
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        month = int(parts[0])
+        year = int(parts[1])
+        if 1 <= month <= 12:
+            return date(year, month, 1)
+
+    return None
+
+
+def configuration_matches_month(configuration, manufacture_date):
+    if not manufacture_date:
+        return True
+
+    start_date = extract_month_from_drom_date(configuration.date_start)
+    end_date = extract_month_from_drom_date(configuration.date_end)
+
+    if start_date and manufacture_date < start_date:
+        return False
+
+    if end_date and manufacture_date > end_date:
+        return False
+
+    return True
+
+
 # =========================================================
-# --- TEST / CSRF FUNCTIONS ---
+# --- CSRF ---
 # =========================================================
 
 @api_view(['GET'])
@@ -264,23 +429,20 @@ def get_csrf_token(request):
     return Response({'csrf_token': token})
 
 
-@api_view(['GET'])
-@permission_classes([AllowAny])
-def test(request):
-    return Response({'test': 123321})
-
-
 @api_view(['POST'])
 @permission_classes([AllowAny])
-def test1(request):
-    name = request.data.get('name', 'default value')
-    return Response({'name': name})
+def logout(request):
+    refresh_token = request.data.get('refresh')
 
+    if not refresh_token:
+        return Response({'detail': 'Refresh token is required.'}, status=status.HTTP_400_BAD_REQUEST)
 
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def test2(request):
-    return Response({'test': 123321})
+    try:
+        RefreshToken(refresh_token).blacklist()
+    except TokenError:
+        return Response({'detail': 'Refresh token is invalid.'}, status=status.HTTP_401_UNAUTHORIZED)
+
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 # =========================================================
@@ -477,13 +639,35 @@ def get_all_generations(request):
         if model_id:
             queryset = queryset.filter(model_id=model_id)
 
+        manufacture_date = request.GET.get('manufacture_date')
+        manufacture_date_value = None
+        if manufacture_date:
+            try:
+                manufacture_date_value = date.fromisoformat(f'{manufacture_date}-01')
+            except ValueError:
+                return Response(
+                    {'manufacture_date': 'Используйте формат YYYY-MM.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
         ordering = request.GET.get('ordering')
         if ordering:
             queryset = queryset.order_by(ordering)
 
+        if manufacture_date_value:
+            queryset = [
+                generation
+                for generation in queryset
+                if configuration_matches_month(generation, manufacture_date_value)
+            ]
+
         paginator = Pagination()
         paginated = paginator.paginate_queryset(queryset, request)
-        serializer = GenerationCardSerializer(paginated, many=True)
+        serializer = GenerationCardSerializer(
+            paginated,
+            many=True,
+            context={'request': request}
+        )
         return paginator.get_paginated_response(serializer.data)
     except Exception:
         return Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -497,7 +681,10 @@ def get_generation(request, pk):
         if not obj:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        serializer = GenerationCardSerializer(obj)
+        serializer = GenerationCardSerializer(
+            obj,
+            context={'request': request}
+        )
         return Response(serializer.data)
     except Exception:
         return Response(status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -577,8 +764,9 @@ def get_model_filter_options(request):
             'seats_counts': seats_counts,
         })
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['GET'])
@@ -629,12 +817,17 @@ def get_filtered_generations(request):
 
         paginator = Pagination()
         paginated = paginator.paginate_queryset(queryset, request)
-        serializer = GenerationCardSerializer(paginated, many=True)
+        serializer = GenerationCardSerializer(
+            paginated,
+            many=True,
+            context={'request': request}
+        )
 
         return paginator.get_paginated_response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -737,12 +930,81 @@ def get_configuration_filter_options(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        car_data = CarData.objects.filter(
-            configuration__generation_id=generation_id
+        manufacture_date = request.GET.get('manufacture_date')
+        manufacture_date_value = None
+
+        if manufacture_date:
+            try:
+                manufacture_date_value = date.fromisoformat(f'{manufacture_date}-01')
+            except ValueError:
+                return Response(
+                    {'manufacture_date': 'Используйте формат YYYY-MM.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        configurations = list(
+            Configuration.objects
+            .filter(generation_id=generation_id)
+            .order_by('id')
         )
 
+        if manufacture_date_value:
+            configurations = [
+                configuration
+                for configuration in configurations
+                if configuration_matches_month(configuration, manufacture_date_value)
+            ]
+
+        drive_type = request.GET.get('drive_type')
+        fuel_type = request.GET.get('fuel_type')
+        engine_model = request.GET.get('engine_model')
+        transmission = request.GET.get('transmission')
+        seats_count = request.GET.get('seats_count')
+        engine_power = request.GET.get('engine_power')
+        body_code = request.GET.get('body_code')
+        front_tires = request.GET.get('front_tires')
+        rear_tires = request.GET.get('rear_tires')
+
+        base_car_data = CarData.objects.filter(
+            configuration_id__in=[configuration.id for configuration in configurations]
+        )
+
+        selected_filters = {
+            'drive_type': drive_type,
+            'fuel_type': fuel_type,
+            'engine_model': engine_model,
+            'transmission': transmission,
+            'seats_count': seats_count,
+            'engine_power_kw': engine_power,
+            'front_tires': front_tires,
+            'rear_tires': rear_tires,
+        }
+
+        def get_car_data_without(excluded_field=None):
+            filtered_car_data = base_car_data
+
+            for field_name, value in selected_filters.items():
+                if field_name != excluded_field and value:
+                    filtered_car_data = filtered_car_data.filter(
+                        **{field_name: value}
+                    )
+
+            if excluded_field != 'body_code' and body_code:
+                matching_configuration_ids = [
+                    row.configuration_id
+                    for row in filtered_car_data
+                    if normalize_body_mark(row.body_mark) == body_code
+                ]
+                filtered_car_data = filtered_car_data.filter(
+                    configuration_id__in=matching_configuration_ids
+                )
+
+            return filtered_car_data
+
+        car_data = get_car_data_without()
+
         drive_types = list(
-            car_data
+            get_car_data_without('drive_type')
             .exclude(drive_type__isnull=True)
             .exclude(drive_type='')
             .values_list('drive_type', flat=True)
@@ -751,7 +1013,7 @@ def get_configuration_filter_options(request):
         )
 
         fuel_types = list(
-            car_data
+            get_car_data_without('fuel_type')
             .exclude(fuel_type__isnull=True)
             .exclude(fuel_type='')
             .values_list('fuel_type', flat=True)
@@ -760,7 +1022,7 @@ def get_configuration_filter_options(request):
         )
 
         engine_models = list(
-            car_data
+            get_car_data_without('engine_model')
             .exclude(engine_model__isnull=True)
             .exclude(engine_model='')
             .values_list('engine_model', flat=True)
@@ -769,7 +1031,7 @@ def get_configuration_filter_options(request):
         )
 
         transmissions = list(
-            car_data
+            get_car_data_without('transmission')
             .exclude(transmission__isnull=True)
             .exclude(transmission='')
             .values_list('transmission', flat=True)
@@ -778,7 +1040,7 @@ def get_configuration_filter_options(request):
         )
 
         seats_counts = list(
-            car_data
+            get_car_data_without('seats_count')
             .exclude(seats_count__isnull=True)
             .exclude(seats_count='')
             .values_list('seats_count', flat=True)
@@ -787,7 +1049,7 @@ def get_configuration_filter_options(request):
         )
 
         engine_powers_kw = list(
-            car_data
+            get_car_data_without('engine_power_kw')
             .exclude(engine_power_kw__isnull=True)
             .values_list('engine_power_kw', flat=True)
             .distinct()
@@ -795,7 +1057,7 @@ def get_configuration_filter_options(request):
         )
 
         body_marks_raw = list(
-            car_data
+            get_car_data_without('body_code')
             .exclude(body_mark__isnull=True)
             .exclude(body_mark='')
             .values_list('body_mark', flat=True)
@@ -812,6 +1074,24 @@ def get_configuration_filter_options(request):
 
         body_marks = sorted(body_marks)
 
+        front_tires = list(
+            get_car_data_without('front_tires')
+            .exclude(front_tires__isnull=True)
+            .exclude(front_tires='')
+            .values_list('front_tires', flat=True)
+            .distinct()
+            .order_by('front_tires')
+        )
+
+        rear_tires = list(
+            get_car_data_without('rear_tires')
+            .exclude(rear_tires__isnull=True)
+            .exclude(rear_tires='')
+            .values_list('rear_tires', flat=True)
+            .distinct()
+            .order_by('rear_tires')
+        )
+
         turbo_values = list(
             car_data
             .exclude(turbo_present__isnull=True)
@@ -827,11 +1107,14 @@ def get_configuration_filter_options(request):
             'seats_counts': seats_counts,
             'engine_powers_kw': engine_powers_kw,
             'body_marks': body_marks,
+            'front_tires': front_tires,
+            'rear_tires': rear_tires,
             'turbo_values': turbo_values,
         })
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['GET'])
@@ -854,8 +1137,11 @@ def get_filtered_configurations(request):
         seats_count = request.GET.get('seats_count')
 
         manufacture_year = request.GET.get('manufacture_year')
+        manufacture_date = request.GET.get('manufacture_date')
         engine_power = request.GET.get('engine_power')
         body_code = request.GET.get('body_code')
+        front_tires = request.GET.get('front_tires')
+        rear_tires = request.GET.get('rear_tires')
         turbo_present = normalize_bool_param(request.GET.get('turbo_present'))
 
         queryset = (
@@ -893,6 +1179,12 @@ def get_filtered_configurations(request):
         if car_filter:
             queryset = queryset.filter(**car_filter)
 
+        if front_tires:
+            queryset = queryset.filter(cardata__front_tires=front_tires)
+
+        if rear_tires:
+            queryset = queryset.filter(cardata__rear_tires=rear_tires)
+
         queryset = queryset.distinct().order_by('name', 'date_start', 'id')
 
         if body_code:
@@ -920,14 +1212,32 @@ def get_filtered_configurations(request):
 
             queryset = Configuration.objects.filter(id__in=filtered_ids).order_by('name', 'date_start', 'id')
 
+        if manufacture_date:
+            try:
+                manufacture_date_value = date.fromisoformat(f'{manufacture_date}-01')
+            except ValueError:
+                return Response(
+                    {'manufacture_date': 'Используйте формат YYYY-MM.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            filtered_ids = [
+                configuration.id
+                for configuration in queryset
+                if configuration_matches_month(configuration, manufacture_date_value)
+            ]
+
+            queryset = Configuration.objects.filter(id__in=filtered_ids).order_by('name', 'date_start', 'id')
+
         paginator = Pagination()
         paginated = paginator.paginate_queryset(queryset, request)
         serializer = ConfigurationSerializer(paginated, many=True)
 
         return paginator.get_paginated_response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1040,8 +1350,9 @@ def get_car_data_by_configuration(request, configuration_id):
         serializer = CarDataProtocolSerializer(obj)
         return Response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1092,7 +1403,14 @@ def delete_car_data(request, pk):
 @permission_classes([IsAuthenticated])
 def get_all_protocols(request):
     try:
+        release_expired_protocol_locks()
         queryset = Protocol.objects.all().order_by('-created_at')
+
+        if is_measurer_request(request):
+            queryset = queryset.filter(user_id=request.user.id)
+
+        if user_has_role(request.user, 'operator'):
+            queryset = queryset.filter(status__in=['operator', 'revision'])
 
         user_id = request.GET.get('user_id')
         if user_id:
@@ -1100,6 +1418,8 @@ def get_all_protocols(request):
 
         status_value = request.GET.get('status')
         if status_value:
+            if user_has_role(request.user, 'operator'):
+                queryset = queryset.filter(status__in=['operator', 'revision'])
             queryset = queryset.filter(status=status_value)
 
         car_id = request.GET.get('car_id')
@@ -1110,8 +1430,9 @@ def get_all_protocols(request):
         paginated = paginator.paginate_queryset(queryset, request)
         serializer = ProtocolSerializer(paginated, many=True)
         return paginator.get_paginated_response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['GET'])
@@ -1122,10 +1443,14 @@ def get_protocol(request, pk):
         if not protocol:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         serializer = ProtocolSerializer(protocol)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1148,13 +1473,12 @@ def create_protocol(request):
         if not data.get('owner_type'):
             data['owner_type'] = 'individual'
 
-        if not data.get('status'):
-            data['status'] = 'draft'
+        data['status'] = 'measurement'
 
         serializer = ProtocolCreateSerializer(data=data)
 
         if serializer.is_valid():
-            protocol = serializer.save()
+            protocol = serializer.save(user=request.user)
 
             protocol.protocol_number = str(protocol.id).zfill(5)
             protocol.save(update_fields=['protocol_number'])
@@ -1166,8 +1490,9 @@ def create_protocol(request):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -1178,6 +1503,9 @@ def update_protocol(request, pk):
         if not protocol:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         data = request.data.copy()
         data['user'] = protocol.user_id
 
@@ -1187,19 +1515,7 @@ def update_protocol(request, pk):
         if serializer.is_valid():
             protocol = serializer.save()
 
-            if protocol.status == 'completed':
-                protocol.returned_for_revision = False
-                protocol.revision_comment = None
-                protocol.cancelled_by = None
-                protocol.cancelled_at = None
-                protocol.save(update_fields=[
-                    'returned_for_revision',
-                    'revision_comment',
-                    'cancelled_by',
-                    'cancelled_at',
-                ])
-
-            if protocol.status in ['draft', 'completed', 'approved', 'cancelled']:
+            if protocol.status in ['approved', 'cancelled']:
                 protocol.locked_by = None
                 protocol.locked_at = None
                 protocol.save(update_fields=['locked_by', 'locked_at'])
@@ -1210,29 +1526,27 @@ def update_protocol(request, pk):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def start_protocol_editing(request, pk):
     try:
+        lock_was_expired = False
+
         with transaction.atomic():
             protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
 
             if not protocol:
                 return Response(status=status.HTTP_404_NOT_FOUND)
 
-            if protocol.status == 'completed':
-                return Response(
-                    {
-                        'detail': 'Завершённый протокол нельзя занять для редактирования.'
-                    },
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
+            if not user_can_access_protocol(request, protocol):
+                return Response(status=status.HTTP_403_FORBIDDEN)
 
-            if protocol.status in ['approved', 'cancelled']:
+            if protocol.status in {'approved', 'cancelled'}:
                 return Response(
                     {
                         'detail': 'Этот протокол нельзя занять для редактирования.'
@@ -1240,35 +1554,74 @@ def start_protocol_editing(request, pk):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-            if (
-                    protocol.status == 'in_progress'
-                    and protocol.locked_by_id
-                    and protocol.locked_by_id != request.user.id
-            ):
-                return Response(
-                    {
-                        'detail': 'Протокол уже редактируется другим пользователем.',
-                        'locked_by_id': protocol.locked_by_id,
-                        'locked_by_username': (
-                            protocol.locked_by.username
-                            if protocol.locked_by
-                            else None
-                        ),
-                    },
-                    status=423,
-                )
+            if protocol.locked_by_id:
+                if protocol.locked_by_id == request.user.id:
+                    protocol.locked_at = timezone.now()
+                    protocol.save(update_fields=['locked_at'])
 
-            protocol.status = 'in_progress'
+                    return Response(ProtocolSerializer(protocol).data)
+
+                if not is_protocol_lock_expired(protocol):
+                    return Response(
+                        {
+                            'detail': 'Протокол уже редактируется другим пользователем.',
+                            'locked_by_id': protocol.locked_by_id,
+                            'locked_by_username': (
+                                protocol.locked_by.username
+                                if protocol.locked_by
+                                else None
+                            ),
+                        },
+                        status=423,
+                    )
+
+                lock_was_expired = True
+
             protocol.locked_by = request.user
             protocol.locked_at = timezone.now()
-            protocol.save(update_fields=['status', 'locked_by', 'locked_at'])
+            protocol.save(update_fields=['locked_by', 'locked_at'])
 
         notify_protocol_status_changed(protocol)
 
-        return Response(ProtocolSerializer(protocol).data)
+        return Response({
+            **ProtocolSerializer(protocol).data,
+            'lock_was_expired': lock_was_expired,
+        })
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def protocol_heartbeat(request, pk):
+    try:
+        with transaction.atomic():
+            protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
+
+            if not protocol:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+
+            if not user_can_access_protocol(request, protocol):
+                return Response(status=status.HTTP_403_FORBIDDEN)
+
+            if protocol.locked_by_id != request.user.id:
+                return Response(
+                    {'detail': 'Протокол занят другим пользователем.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            protocol.locked_at = timezone.now()
+            protocol.save(update_fields=['locked_at'])
+
+        return Response({
+            'status': protocol.status,
+            'locked_at': protocol.locked_at,
+        })
+
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1281,17 +1634,252 @@ def return_protocol_to_draft(request, pk):
             if not protocol:
                 return Response(status=status.HTTP_404_NOT_FOUND)
 
-            protocol.status = 'draft'
-            protocol.locked_by = None
-            protocol.locked_at = None
-            protocol.save(update_fields=['status', 'locked_by', 'locked_at'])
+            if not user_can_access_protocol(request, protocol):
+                return Response(status=status.HTTP_403_FORBIDDEN)
+
+            if protocol.status in {'approved', 'cancelled'}:
+                if not is_protocol_reviewer_or_superuser_request(request):
+                    return Response(status=status.HTTP_403_FORBIDDEN)
+
+                protocol.status = 'operator'
+                protocol.returned_for_revision = False
+                protocol.revision_comment = None
+                protocol.cancelled_by = None
+                protocol.cancelled_at = None
+                protocol.locked_by = request.user
+                protocol.locked_at = timezone.now()
+                protocol.save(update_fields=[
+                    'status',
+                    'returned_for_revision',
+                    'revision_comment',
+                    'cancelled_by',
+                    'cancelled_at',
+                    'locked_by',
+                    'locked_at',
+                ])
+            elif protocol.locked_by_id == request.user.id:
+                protocol.locked_by = None
+                protocol.locked_at = None
+                protocol.save(update_fields=['locked_by', 'locked_at'])
 
         notify_protocol_status_changed(protocol)
 
         return Response(ProtocolSerializer(protocol).data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def submit_protocol_to_operator(request, pk):
+    try:
+        with transaction.atomic():
+            protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
+
+            if not protocol:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+
+            if not user_can_edit_protocol(request, protocol):
+                return Response(
+                    {'detail': 'Протокол должен быть открыт вами для передачи оператору.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if protocol.status != 'measurement':
+                return Response(
+                    {'detail': 'Передать оператору можно только протокол замерщика.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            protocol.status = 'operator'
+            protocol.locked_by = None
+            protocol.locked_at = None
+            protocol.save(update_fields=['status', 'locked_by', 'locked_at'])
+
+        notify_protocol_status_changed(protocol)
+        return Response(ProtocolSerializer(protocol).data)
+
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def submit_protocol_for_review(request, pk):
+    try:
+        with transaction.atomic():
+            protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
+
+            if not protocol:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+
+            if not user_can_edit_protocol(request, protocol):
+                return Response(
+                    {'detail': 'Протокол должен быть открыт вами для отправки на проверку.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            if protocol.status not in {'operator', 'revision'}:
+                return Response(
+                    {'detail': 'На проверку можно отправить протокол оператора.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            protocol.status = 'review'
+            protocol.returned_for_revision = False
+            protocol.revision_comment = None
+            protocol.cancelled_by = None
+            protocol.cancelled_at = None
+            protocol.locked_by = None
+            protocol.locked_at = None
+            protocol.save(update_fields=[
+                'status',
+                'returned_for_revision',
+                'revision_comment',
+                'cancelled_by',
+                'cancelled_at',
+                'locked_by',
+                'locked_at',
+            ])
+
+        notify_protocol_status_changed(protocol)
+        return Response(ProtocolSerializer(protocol).data)
+
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def select_protocol_configuration(request, pk):
+    try:
+        generation_id = request.data.get('generation_id')
+        configuration_id = request.data.get('configuration_id')
+        manufacture_date = request.data.get('manufacture_date')
+
+        if not generation_id or not configuration_id:
+            return Response(
+                {'detail': 'generation_id и configuration_id обязательны.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        manufacture_date_value = None
+        if manufacture_date:
+            try:
+                manufacture_date_value = date.fromisoformat(f'{manufacture_date}-01')
+            except ValueError:
+                return Response(
+                    {'detail': 'manufacture_date должен быть в формате YYYY-MM.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+        with transaction.atomic():
+            protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
+            if not protocol:
+                return Response(status=status.HTTP_404_NOT_FOUND)
+
+            if not user_can_edit_protocol(request, protocol):
+                return Response(
+                    {'detail': 'Протокол должен быть открыт вами для выбора конфигурации.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            generation = Generation.objects.filter(
+                pk=generation_id,
+                model_id=protocol.model_id,
+            ).first()
+            configuration = Configuration.objects.filter(
+                pk=configuration_id,
+                generation_id=generation_id,
+            ).first()
+
+            if not generation or not configuration:
+                return Response(
+                    {'detail': 'Поколение или конфигурация не соответствуют протоколу.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if manufacture_date_value and not configuration_matches_month(
+                configuration,
+                manufacture_date_value,
+            ):
+                return Response(
+                    {'detail': 'Конфигурация не выпускалась в указанный месяц.'},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            car_data = (
+                CarData.objects
+                .select_related(
+                    'configuration',
+                    'configuration__generation',
+                    'configuration__generation__model',
+                    'configuration__generation__model__brand',
+                )
+                .filter(configuration_id=configuration.id)
+                .first()
+            )
+            protocol.generation = generation
+            protocol.configuration = configuration
+            protocol.car = car_data
+            protocol.manufacture_date = manufacture_date_value
+            protocol_update_fields = ['generation', 'configuration', 'car', 'manufacture_date']
+
+            if car_data:
+                defaults = ProtocolCreateSerializer().get_car_data_defaults(car_data)
+                protocol_dash_fields = set(protocol.dash_fields or [])
+                for field_name, value in defaults['protocol'].items():
+                    if (
+                        field_name not in protocol_dash_fields
+                        and value is not None
+                        and getattr(protocol, field_name) in (None, '')
+                    ):
+                        setattr(protocol, field_name, value)
+                        protocol_update_fields.append(field_name)
+
+                measurement, _ = ProtocolMeasurement.objects.get_or_create(
+                    protocol=protocol,
+                )
+                measurement_dash_fields = set(measurement.dash_fields or [])
+                measurement_update_fields = []
+                for field_name, value in defaults['measurement'].items():
+                    if (
+                        field_name not in measurement_dash_fields
+                        and value is not None
+                        and getattr(measurement, field_name) in (None, '')
+                    ):
+                        setattr(measurement, field_name, value)
+                        measurement_update_fields.append(field_name)
+                if measurement_update_fields:
+                    measurement.save(update_fields=measurement_update_fields)
+
+                brake, _ = ProtocolBrake.objects.get_or_create(
+                    protocol=protocol,
+                )
+                brake_dash_fields = set(brake.dash_fields or [])
+                brake_update_fields = []
+                for field_name, value in defaults['brake'].items():
+                    if (
+                        field_name not in brake_dash_fields
+                        and value is not None
+                        and getattr(brake, field_name) in (None, '')
+                    ):
+                        setattr(brake, field_name, value)
+                        brake_update_fields.append(field_name)
+                if brake_update_fields:
+                    brake.save(update_fields=brake_update_fields)
+
+            protocol.save(update_fields=protocol_update_fields)
+
+        return Response(ProtocolSerializer(protocol).data)
+
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -1309,25 +1897,17 @@ def manager_release_protocol_lock(request, pk):
             if not protocol:
                 return Response(status=status.HTTP_404_NOT_FOUND)
 
-            if protocol.status != 'in_progress':
-                return Response(
-                    {
-                        'detail': 'Освободить можно только протокол в статусе "В работе".'
-                    },
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            protocol.status = 'draft'
             protocol.locked_by = None
             protocol.locked_at = None
-            protocol.save(update_fields=['status', 'locked_by', 'locked_at'])
+            protocol.save(update_fields=['locked_by', 'locked_at'])
 
         notify_protocol_status_changed(protocol)
 
         return Response(ProtocolSerializer(protocol).data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -1345,9 +1925,9 @@ def approve_protocol(request, pk):
             if not protocol:
                 return Response(status=status.HTTP_404_NOT_FOUND)
 
-            if protocol.status != 'completed':
+            if protocol.status != 'review':
                 return Response(
-                    {'detail': 'Утвердить можно только завершённый протокол.'},
+                    {'detail': 'Утвердить можно только протокол на проверке.'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -1373,8 +1953,9 @@ def approve_protocol(request, pk):
 
         return Response(ProtocolSerializer(protocol).data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1393,9 +1974,9 @@ def cancel_protocol(request, pk):
             if not protocol:
                 return Response(status=status.HTTP_404_NOT_FOUND)
 
-            if protocol.status != 'completed':
+            if protocol.status != 'review':
                 return Response(
-                    {'detail': 'На доработку можно вернуть только завершённый протокол.'},
+                    {'detail': 'На доработку можно вернуть только протокол на проверке.'},
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
@@ -1403,7 +1984,7 @@ def cancel_protocol(request, pk):
                 request.data.get('revision_comment', '')
             ).strip()
 
-            protocol.status = 'draft'
+            protocol.status = 'revision'
             protocol.returned_for_revision = True
             protocol.revision_comment = revision_comment
             protocol.cancelled_by = request.user
@@ -1425,8 +2006,9 @@ def cancel_protocol(request, pk):
 
         return Response(ProtocolSerializer(protocol).data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
@@ -1436,10 +2018,14 @@ def delete_protocol(request, pk):
         if not protocol:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         protocol.delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -1456,8 +2042,9 @@ def get_protocol_measurement(request, protocol_id):
 
         serializer = ProtocolMeasurementSerializer(obj)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1467,6 +2054,9 @@ def create_protocol_measurement(request, protocol_id):
         protocol = Protocol.objects.filter(pk=protocol_id).first()
         if not protocol:
             return Response(status=status.HTTP_404_NOT_FOUND)
+
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
 
         existing = ProtocolMeasurement.objects.filter(protocol_id=protocol_id).first()
         if existing:
@@ -1484,8 +2074,9 @@ def create_protocol_measurement(request, protocol_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -1509,8 +2100,9 @@ def update_protocol_measurement(request, protocol_id):
             return Response(serializer.data)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -1527,8 +2119,9 @@ def get_protocol_brake(request, protocol_id):
 
         serializer = ProtocolBrakeSerializer(obj)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1555,8 +2148,9 @@ def create_protocol_brake(request, protocol_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -1580,8 +2174,9 @@ def update_protocol_brake(request, protocol_id):
             return Response(serializer.data)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -1598,8 +2193,9 @@ def get_protocol_light(request, protocol_id):
 
         serializer = ProtocolLightSerializer(obj)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1626,8 +2222,9 @@ def create_protocol_light(request, protocol_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -1651,8 +2248,9 @@ def update_protocol_light(request, protocol_id):
             return Response(serializer.data)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 DOCX_PHOTO_TYPES = [
@@ -1741,8 +2339,9 @@ def get_protocol_photos(request, protocol_id):
 
         return Response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1808,8 +2407,9 @@ def create_protocol_photo(request, protocol_id):
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -1878,8 +2478,9 @@ def update_protocol_photo(request, photo_id):
 
         return Response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['DELETE'])
@@ -1896,8 +2497,9 @@ def delete_protocol_photo(request, photo_id):
 
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -1914,8 +2516,9 @@ def get_protocol_test_conditions(request, protocol_id):
 
         serializer = ProtocolTestConditionSerializer(obj)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -1942,8 +2545,9 @@ def create_protocol_test_conditions(request, protocol_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -1967,8 +2571,9 @@ def update_protocol_test_conditions(request, protocol_id):
             return Response(serializer.data)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -1985,8 +2590,9 @@ def get_protocol_road_conditions(request, protocol_id):
 
         serializer = ProtocolRoadConditionSerializer(obj)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -2013,8 +2619,9 @@ def create_protocol_road_conditions(request, protocol_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -2038,8 +2645,9 @@ def update_protocol_road_conditions(request, protocol_id):
             return Response(serializer.data)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -2056,8 +2664,9 @@ def get_protocol_power_supply(request, protocol_id):
 
         serializer = ProtocolPowerSupplySerializer(obj)
         return Response(serializer.data)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['POST'])
@@ -2084,8 +2693,9 @@ def create_protocol_power_supply(request, protocol_id):
             return Response(serializer.data, status=status.HTTP_201_CREATED)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['PUT', 'PATCH'])
@@ -2109,8 +2719,9 @@ def update_protocol_power_supply(request, protocol_id):
             return Response(serializer.data)
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -2125,6 +2736,9 @@ def get_full_protocol(request, protocol_id):
         if not protocol:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
         serializer = ProtocolFullSerializer(
             protocol,
             context={'request': request}
@@ -2132,8 +2746,9 @@ def get_full_protocol(request, protocol_id):
 
         return Response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -2152,15 +2767,19 @@ def get_all_users(request):
 
         queryset = (
             User.objects
-            .filter(is_superuser=False)
+            .filter(
+                is_superuser=False,
+                is_active=True,
+            )
             .order_by('id')
         )
 
         serializer = UserSerializer(queryset, many=True)
         return Response(serializer.data)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 @api_view(['GET'])
@@ -2192,8 +2811,9 @@ def create_employee_user(request):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 @api_view(['PATCH'])
 @permission_classes([IsAuthenticated])
@@ -2236,8 +2856,9 @@ def update_employee_user(request, user_id):
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 @api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
@@ -2269,6 +2890,12 @@ def delete_employee_user(request, user_id):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        if not employee.is_active:
+            return Response(
+                {'detail': 'Сотрудник уже деактивирован.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
         confirm_text = str(request.data.get('confirm_text', '')).strip().lower()
 
         if confirm_text != 'удалить':
@@ -2277,12 +2904,17 @@ def delete_employee_user(request, user_id):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        employee.delete()
+        employee.is_active = False
+        employee.save(update_fields=['is_active'])
 
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return Response(
+            {'detail': 'Сотрудник удалён из активного списка.'},
+            status=status.HTTP_200_OK
+        )
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -2296,9 +2928,6 @@ def create_word(request):
         data = request.data
         word_file = create_car_word_doc(data)
 
-        # если потом понадобится websocket-уведомление — слой уже доступен
-        _channel_layer = get_channel_layer()
-
         response = HttpResponse(
             word_file.getvalue(),
             content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
@@ -2307,8 +2936,9 @@ def create_word(request):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
         return response
 
-    except Exception as e:
-        return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
 
 
 # =========================================================
@@ -2326,16 +2956,68 @@ def generate_protocol_docx_file(request, protocol_id):
                 status=status.HTTP_404_NOT_FOUND
             )
 
-        file_path = generate_protocol_docx(protocol)
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        template_variant = request.data.get('template', 'old')
+        try:
+            file_path = generate_protocol_docx(protocol, template_variant)
+        except ValueError as error:
+            return Response(
+                {'error': str(error)},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         return FileResponse(
             open(file_path, 'rb'),
             as_attachment=True,
-            filename=f'protocol_{protocol.id}.docx',
+            filename=file_path.name,
             content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
         )
-    except Exception as e:
-        return Response(
-            {'error': str(e)},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def preview_protocol_pdf_file(request, protocol_id):
+    temp_dir = None
+
+    try:
+        protocol = Protocol.objects.filter(pk=protocol_id).first()
+        if not protocol:
+            return Response(
+                {'error': 'Protocol not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+        if not user_can_access_protocol(request, protocol):
+            return Response(status=status.HTTP_403_FORBIDDEN)
+
+        docx_path = generate_protocol_docx(protocol)
+        temp_dir, pdf_path = convert_docx_to_pdf(docx_path)
+
+        response = FileResponse(
+            open(pdf_path, 'rb'),
+            as_attachment=False,
+            filename=f'protocol_{protocol.id}.pdf',
+            content_type='application/pdf',
         )
+        response._resource_closers.append(
+            lambda: cleanup_pdf_preview(temp_dir)
+        )
+        return response
+    except FileNotFoundError as error:
+        if temp_dir:
+            cleanup_pdf_preview(temp_dir)
+        logger.warning('Protocol PDF preview is unavailable: %s', error)
+        return Response(
+            {'error': 'Предпросмотр PDF недоступен: установите LibreOffice на сервере.'},
+            status=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    except Exception:
+        if temp_dir:
+            cleanup_pdf_preview(temp_dir)
+        logger.exception('Unhandled exception in protocol PDF preview')
+        return internal_server_error()

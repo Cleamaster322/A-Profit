@@ -1,12 +1,20 @@
-import {useEffect, useRef, useState} from "react";
-import {useNavigate, useParams} from "react-router-dom";
+import {useCallback, useEffect, useRef, useState} from "react";
+import {useLocation, useNavigate, useParams} from "react-router-dom";
 import api from "../shared/api.jsx";
+import {getApiErrorMessage} from "../shared/errorHandler.jsx";
+import {validateProtocolNumericRanges} from "../Features/ProtocolInspection/numericRangeValidation.js";
 
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
 import Typography from "@mui/material/Typography";
 import Alert from "@mui/material/Alert";
 import Chip from "@mui/material/Chip";
+import Dialog from "@mui/material/Dialog";
+import DialogActions from "@mui/material/DialogActions";
+import DialogContent from "@mui/material/DialogContent";
+import DialogTitle from "@mui/material/DialogTitle";
+import MenuItem from "@mui/material/MenuItem";
+import TextField from "@mui/material/TextField";
 
 import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolInspectionHeader.jsx";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
@@ -31,11 +39,73 @@ import {
     selectFieldSx,
 } from "../Features/ProtocolInspection/protocolInspectionStyles.jsx";
 
+function normalizeCatalogReviewValue(key, value) {
+    const text = String(value ?? "").trim().toLowerCase();
+    if (!text) return value;
+
+    if (key === "fuel_type") {
+        if (/бенз|petrol|gasoline/.test(text)) return "petrol";
+        if (/диз|diesel/.test(text)) return "diesel";
+        if (/гибрид|hybrid/.test(text)) return "hybrid";
+        if (/элект|electric/.test(text)) return "electric";
+    }
+
+    if (key === "drive_type") {
+        if (/полн|full|4wd|awd|4x4/.test(text)) return "4x4";
+        if (/перед|front|fwd/.test(text)) return "4x2_front";
+        if (/зад|rear|rwd/.test(text)) return "4x2_rear";
+    }
+
+    if (key === "transmission") {
+        if (/вариатор|cvt/.test(text)) return "variator";
+        if (/механ|мкпп|manual/.test(text)) return "manual";
+        if (/робот|robot/.test(text)) return "robot";
+        if (/редуктор|reductor/.test(text)) return "reductor";
+        if (/автомат|акпп|automatic/.test(text)) return "automatic";
+    }
+
+    if (key === "cylinder_layout") {
+        if (/ряд|inline/.test(text)) return "inline";
+        if (/оппозит|opposed/.test(text)) return "opposed";
+        if (/v[- ]?образ|^v$/.test(text)) return "v_shape";
+    }
+
+    if (key === "turbo_present") {
+        if (["true", "1", "yes", "да", "есть"].includes(text)) return "true";
+        if (["false", "0", "no", "нет", "отсутствует"].includes(text)) return "false";
+    }
+
+    return value;
+}
+
+function formatReviewValue(key, value) {
+    if (value === null || value === undefined || String(value).trim() === "") {
+        return "—";
+    }
+
+    const normalizedValue = normalizeCatalogReviewValue(key, value);
+    const text = String(normalizedValue).trim();
+    const numericValue = Number(text.replace(",", "."));
+
+    return text && Number.isFinite(numericValue) ? String(numericValue) : normalizedValue;
+}
+
+function areReviewValuesEqual(key, left, right) {
+    const leftValue = formatReviewValue(key, left);
+    const rightValue = formatReviewValue(key, right);
+
+    return String(leftValue).trim().toLowerCase() === String(rightValue).trim().toLowerCase();
+}
+
 const initialForm = {
     protocol_number: "",
     appendix_number: "",
     protocol_date: "",
     status: "",
+    model_id: "",
+    generation_id: "",
+    configuration_id: "",
+    revision_comment: "",
     owner_last_name: "",
     owner_first_name: "",
     owner_middle_name: "",
@@ -75,6 +145,7 @@ const initialForm = {
 
     engine_model: "",
     engine_power_kw: "",
+    supercharger: "",
     engine_layout: "",
     cylinder_layout: "",
     cylinders_count: "",
@@ -131,7 +202,6 @@ const initialForm = {
     adaptive_front_lighting_count: "",
     adaptive_front_lighting_color: "",
 
-    headlight_type: "",
     headlight_washer_present: "",
     left_34v_cd: "",
     left_52h_cd: "",
@@ -162,6 +232,7 @@ const initialForm = {
     steering_lock_present: "",
     gas_equipment_present: "",
     glonass_button_present: "",
+    pneumatic_suspension_present: "",
 
     bumper_ends_bent_to_body: "",
     bumper_to_body_distance_mm: "",
@@ -218,6 +289,14 @@ function toFormValue(value, dashFields = [], apiFieldName = null) {
     return value;
 }
 
+function toLightCountFormValue(value, dashFields, apiFieldName) {
+    if (value !== null && value !== undefined && Number(value) === 0) {
+        return "";
+    }
+
+    return toFormValue(value, dashFields, apiFieldName);
+}
+
 function booleanToSelect(value) {
     if (value === true) return "true";
     if (value === false) return "false";
@@ -240,6 +319,36 @@ function emptyToNull(value) {
     }
 
     return value;
+}
+
+function normalizeDecimalComma(value) {
+    if (typeof value !== "string") {
+        return value;
+    }
+
+    const trimmedValue = value.trim();
+
+    if (trimmedValue === "" || trimmedValue === "-") {
+        return value;
+    }
+
+    return trimmedValue.replace(",", ".");
+}
+
+function normalizeNumericPayload(payload, numericFields) {
+    const normalizedPayload = {
+        ...payload,
+    };
+
+    numericFields.forEach((fieldName) => {
+        if (fieldName in normalizedPayload) {
+            normalizedPayload[fieldName] = normalizeDecimalComma(
+                normalizedPayload[fieldName]
+            );
+        }
+    });
+
+    return normalizedPayload;
 }
 
 function formatProtocolNumber(value) {
@@ -282,6 +391,66 @@ function formatDateForChip(value) {
     const [year, month, day] = parts;
 
     return `${day}-${month}-${year}`;
+}
+
+function formatApiError(errorData) {
+    if (!errorData) {
+        return "Ошибка сохранения блока";
+    }
+
+    if (typeof errorData === "string") {
+        return errorData;
+    }
+
+    if (Array.isArray(errorData)) {
+        return errorData.join(", ");
+    }
+
+    if (typeof errorData === "object") {
+        return Object.entries(errorData)
+            .map(([field, messages]) => {
+                if (Array.isArray(messages)) {
+                    return `${field}: ${messages.join(", ")}`;
+                }
+
+                return `${field}: ${messages}`;
+            })
+            .join("\n");
+    }
+
+    return "Ошибка сохранения блока";
+}
+
+function getErrorFields(errorData) {
+    if (!errorData || typeof errorData !== "object" || Array.isArray(errorData)) {
+        return [];
+    }
+
+    return Object.keys(errorData);
+}
+
+function hasAnyField(errorFields, expectedFields) {
+    return errorFields.some((field) => expectedFields.includes(field));
+}
+
+function BlockError({message}) {
+    if (!message) {
+        return null;
+    }
+
+    return (
+        <Alert
+            severity="error"
+            sx={{
+                mb: 2,
+                borderRadius: 0,
+                border: "1px solid #b3261e",
+                whiteSpace: "pre-line",
+            }}
+        >
+            {message}
+        </Alert>
+    );
 }
 
 const PROTOCOL_DASH_FIELDS = [
@@ -434,7 +603,6 @@ const LIGHT_DASH_FIELDS = [
     {formField: "adaptive_front_lighting_count", apiField: "adaptive_front_lighting_count"},
     {formField: "adaptive_front_lighting_color", apiField: "adaptive_front_lighting_color"},
 
-    {formField: "headlight_type", apiField: "headlight_type"},
 
     {formField: "left_34v_cd", apiField: "left_34v_cd"},
     {formField: "left_52h_cd", apiField: "left_52h_cd"},
@@ -468,6 +636,218 @@ const LIGHT_DASH_FIELDS = [
     {formField: "rear_fog_lower_point_mm", apiField: "rear_fog_lower_point_mm"},
 ];
 
+const MEASUREMENT_ENGINE_FIELDS = [
+    "engine_model",
+    "engine_power_kw",
+    "engine_layout",
+    "cylinder_layout",
+    "cylinders_count",
+    "fuel_type",
+    "turbo_present",
+];
+
+const MEASUREMENT_STEERING_TRANSMISSION_FIELDS = [
+    "steering_booster_type",
+    "steering_backlash_deg",
+    "transmission_type",
+];
+
+const MEASUREMENT_MISC_FIELDS = [
+    "tire_depth_fl_mm",
+    "tire_depth_fr_mm",
+    "tire_depth_rl_mm",
+    "tire_depth_rr_mm",
+    "bumper_bends_to_body",
+    "bumper_to_body_distance_mm",
+    "opening_roof_present",
+    "pneumatic_suspension_present",
+    "fuel_tank_leak_protection_measure",
+    "protruding_elements_doors_mm",
+    "protruding_elements_other_mm",
+    "glass_transparency_right_pct",
+    "glass_transparency_left_pct",
+    "glass_transparency_windshield_pct",
+    "sun_strip_width_mm",
+    "speed_by_speedometer_kmh",
+    "actual_speed_kmh",
+    "exhaust_noise_constant_db",
+    "exhaust_noise_deceleration_db",
+    "co_min_pct",
+    "co_max_pct",
+    "light_absorption_1",
+    "light_absorption_2",
+    "light_absorption_3",
+    "light_absorption_4",
+    "light_absorption_5",
+    "light_absorption_6",
+    "vehicle_length_mm",
+    "vehicle_width_mm",
+    "vehicle_height_mm",
+    "vehicle_weight_kg",
+    "axle1_load_kg",
+    "axle2_load_kg",
+    "spare_wheel_present",
+    "steering_lock_present",
+    "gas_equipment_present",
+    "glonass_button_present",
+];
+
+const LIGHT_GEOMETRY_FIELDS = [
+    "low_beam_upper_point_mm",
+    "low_beam_lower_point_mm",
+    "fog_light_upper_point_mm",
+    "fog_light_lower_point_mm",
+    "fog_light_left_distance_mm",
+    "fog_light_right_distance_mm",
+    "brake_signal_upper_point_mm",
+    "brake_signal_lower_point_mm",
+    "brake_signal_left_distance_mm",
+    "brake_signal_right_distance_mm",
+    "additional_brake_signal_from_glass_edge_mm",
+    "additional_brake_signal_from_support_surface_mm",
+    "additional_brake_signal_optical_center_shift_mm",
+    "rear_fog_upper_point_mm",
+    "rear_fog_lower_point_mm",
+];
+
+const PROTOCOL_NUMERIC_FIELDS = [
+    "manufacture_year",
+];
+
+const TEST_CONDITIONS_NUMERIC_FIELDS = [
+    "ambient_temperature_c",
+    "relative_humidity_pct",
+    "atmospheric_pressure_kpa",
+];
+
+const ROAD_CONDITIONS_NUMERIC_FIELDS = [
+    "road_ambient_temperature_c",
+    "road_relative_humidity_pct",
+];
+
+const POWER_SUPPLY_NUMERIC_FIELDS = [
+    "frequency_hz",
+    "phase_a_n_voltage_v",
+    "phase_b_n_voltage_v",
+    "phase_c_n_voltage_v",
+    "phase_ab_voltage_v",
+    "phase_bc_voltage_v",
+    "phase_ac_voltage_v",
+];
+
+const MEASUREMENT_NUMERIC_FIELDS = [
+    "mileage_km",
+    "mufflers_count",
+
+    "engine_power_kw",
+    "cylinders_count",
+
+    "steering_backlash_deg",
+
+    "tire_depth_fl_mm",
+    "tire_depth_fr_mm",
+    "tire_depth_rl_mm",
+    "tire_depth_rr_mm",
+
+    "bumper_to_body_distance_mm",
+    "protruding_elements_doors_mm",
+    "protruding_elements_other_mm",
+
+    "glass_transparency_right_pct",
+    "glass_transparency_left_pct",
+    "glass_transparency_windshield_pct",
+    "sun_strip_width_mm",
+
+    "speed_by_speedometer_kmh",
+    "actual_speed_kmh",
+
+    "exhaust_noise_constant_db",
+    "exhaust_noise_deceleration_db",
+
+    "co_min_pct",
+    "co_max_pct",
+
+    "light_absorption_1",
+    "light_absorption_2",
+    "light_absorption_3",
+    "light_absorption_4",
+    "light_absorption_5",
+    "light_absorption_6",
+
+    "vehicle_length_mm",
+    "vehicle_width_mm",
+    "vehicle_height_mm",
+    "vehicle_weight_kg",
+
+    "axle1_load_kg",
+    "axle2_load_kg",
+];
+
+const BRAKE_NUMERIC_FIELDS = [
+    "service_brake_control_force_axle1_n",
+    "service_brake_control_force_axle2_n",
+    "parking_brake_control_force_n",
+
+    "axle_1_brake_difference_pct",
+    "axle_2_brake_difference_pct",
+
+    "service_brake_front_left_kn",
+    "service_brake_front_right_kn",
+    "service_brake_rear_left_kn",
+    "service_brake_rear_right_kn",
+
+    "parking_brake_left_kn",
+    "parking_brake_right_kn",
+];
+
+const LIGHT_NUMERIC_FIELDS = [
+    "low_beam_count",
+    "high_beam_count",
+    "front_fog_count",
+    "reverse_light_count",
+    "turn_signal_count",
+    "front_position_light_count",
+    "rear_position_light_count",
+    "main_brake_signal_count",
+    "additional_brake_signal_count",
+    "rear_fog_count",
+    "plate_light_count",
+    "daytime_running_light_count",
+    "parking_light_count",
+    "rear_parking_light_count",
+    "adaptive_front_lighting_count",
+
+    "left_34v_cd",
+    "left_52h_cd",
+    "left_high_beam_cd",
+    "right_34v_cd",
+    "right_52h_cd",
+    "right_high_beam_cd",
+
+    "turn_signal_frequency_per_min",
+    "turn_signal_frequency_hz",
+
+    "low_beam_upper_point_mm",
+    "low_beam_lower_point_mm",
+
+    "fog_light_upper_point_mm",
+    "fog_light_lower_point_mm",
+    "fog_light_left_distance_mm",
+    "fog_light_right_distance_mm",
+
+    "brake_signal_upper_point_mm",
+    "brake_signal_lower_point_mm",
+    "brake_signal_left_distance_mm",
+    "brake_signal_right_distance_mm",
+
+    "additional_brake_signal_from_glass_edge_mm",
+    "additional_brake_signal_from_support_surface_mm",
+    "additional_brake_signal_optical_center_shift_mm",
+
+    "rear_fog_upper_point_mm",
+    "rear_fog_lower_point_mm",
+];
+
 function mapProtocolToForm(data) {
     const protocol = data || {};
     const measurement = protocol.measurement || {};
@@ -492,6 +872,11 @@ function mapProtocolToForm(data) {
         appendix_number: toFormValue(protocol.appendix_number, protocolDashFields, "appendix_number"),
         protocol_date: protocol.protocol_date || "",
         status: protocol.status || "",
+        model_id: protocol.model || "",
+        generation_id: protocol.generation || "",
+        configuration_id: protocol.configuration || "",
+        revision_comment: protocol.revision_comment || "",
+        supercharger: toFormValue(protocol.supercharger, protocolDashFields, "supercharger"),
 
         owner_last_name: toFormValue(protocol.owner_last_name, protocolDashFields, "owner_last_name"),
         owner_first_name: toFormValue(protocol.owner_first_name, protocolDashFields, "owner_first_name"),
@@ -557,39 +942,38 @@ function mapProtocolToForm(data) {
         parking_brake_left_kn: toFormValue(brake.parking_brake_left_kn, brakeDashFields, "parking_brake_left_kn"),
         parking_brake_right_kn: toFormValue(brake.parking_brake_right_kn, brakeDashFields, "parking_brake_right_kn"),
 
-        low_beam_count: toFormValue(light.low_beam_count, lightDashFields, "low_beam_count"),
+        low_beam_count: toLightCountFormValue(light.low_beam_count, lightDashFields, "low_beam_count"),
         low_beam_color: toFormValue(light.low_beam_color, lightDashFields, "low_beam_color"),
-        high_beam_count: toFormValue(light.high_beam_count, lightDashFields, "high_beam_count"),
+        high_beam_count: toLightCountFormValue(light.high_beam_count, lightDashFields, "high_beam_count"),
         high_beam_color: toFormValue(light.high_beam_color, lightDashFields, "high_beam_color"),
-        front_fog_count: toFormValue(light.front_fog_count, lightDashFields, "front_fog_count"),
+        front_fog_count: toLightCountFormValue(light.front_fog_count, lightDashFields, "front_fog_count"),
         front_fog_color: toFormValue(light.front_fog_color, lightDashFields, "front_fog_color"),
-        reverse_light_count: toFormValue(light.reverse_light_count, lightDashFields, "reverse_light_count"),
+        reverse_light_count: toLightCountFormValue(light.reverse_light_count, lightDashFields, "reverse_light_count"),
         reverse_light_color: toFormValue(light.reverse_light_color, lightDashFields, "reverse_light_color"),
-        turn_signal_count: toFormValue(light.turn_signal_count, lightDashFields, "turn_signal_count"),
+        turn_signal_count: toLightCountFormValue(light.turn_signal_count, lightDashFields, "turn_signal_count"),
         turn_signal_color: toFormValue(light.turn_signal_color, lightDashFields, "turn_signal_color"),
-        front_position_light_count: toFormValue(light.front_position_light_count, lightDashFields, "front_position_light_count"),
+        front_position_light_count: toLightCountFormValue(light.front_position_light_count, lightDashFields, "front_position_light_count"),
         front_position_light_color: toFormValue(light.front_position_light_color, lightDashFields, "front_position_light_color"),
-        rear_position_light_count: toFormValue(light.rear_position_light_count, lightDashFields, "rear_position_light_count"),
+        rear_position_light_count: toLightCountFormValue(light.rear_position_light_count, lightDashFields, "rear_position_light_count"),
         rear_position_light_color: toFormValue(light.rear_position_light_color, lightDashFields, "rear_position_light_color"),
-        main_brake_signal_count: toFormValue(light.main_brake_signal_count, lightDashFields, "main_brake_signal_count"),
+        main_brake_signal_count: toLightCountFormValue(light.main_brake_signal_count, lightDashFields, "main_brake_signal_count"),
         main_brake_signal_color: toFormValue(light.main_brake_signal_color, lightDashFields, "main_brake_signal_color"),
-        additional_brake_signal_count: toFormValue(light.additional_brake_signal_count, lightDashFields, "additional_brake_signal_count"),
+        additional_brake_signal_count: toLightCountFormValue(light.additional_brake_signal_count, lightDashFields, "additional_brake_signal_count"),
         additional_brake_signal_color: toFormValue(light.additional_brake_signal_color, lightDashFields, "additional_brake_signal_color"),
-        rear_fog_count: toFormValue(light.rear_fog_count, lightDashFields, "rear_fog_count"),
+        rear_fog_count: toLightCountFormValue(light.rear_fog_count, lightDashFields, "rear_fog_count"),
         rear_fog_color: toFormValue(light.rear_fog_color, lightDashFields, "rear_fog_color"),
-        plate_light_count: toFormValue(light.plate_light_count, lightDashFields, "plate_light_count"),
+        plate_light_count: toLightCountFormValue(light.plate_light_count, lightDashFields, "plate_light_count"),
         plate_light_color: toFormValue(light.plate_light_color, lightDashFields, "plate_light_color"),
-        daytime_running_light_count: toFormValue(light.daytime_running_light_count, lightDashFields, "daytime_running_light_count"),
+        daytime_running_light_count: toLightCountFormValue(light.daytime_running_light_count, lightDashFields, "daytime_running_light_count"),
         daytime_running_light_color: toFormValue(light.daytime_running_light_color, lightDashFields, "daytime_running_light_color"),
 
-        parking_light_count: toFormValue(light.parking_light_count, lightDashFields, "parking_light_count"),
+        parking_light_count: toLightCountFormValue(light.parking_light_count, lightDashFields, "parking_light_count"),
         parking_light_color: toFormValue(light.parking_light_color, lightDashFields, "parking_light_color"),
-        rear_parking_light_count: toFormValue(light.rear_parking_light_count, lightDashFields, "rear_parking_light_count"),
+        rear_parking_light_count: toLightCountFormValue(light.rear_parking_light_count, lightDashFields, "rear_parking_light_count"),
         rear_parking_light_color: toFormValue(light.rear_parking_light_color, lightDashFields, "rear_parking_light_color"),
-        adaptive_front_lighting_count: toFormValue(light.adaptive_front_lighting_count, lightDashFields, "adaptive_front_lighting_count"),
+        adaptive_front_lighting_count: toLightCountFormValue(light.adaptive_front_lighting_count, lightDashFields, "adaptive_front_lighting_count"),
         adaptive_front_lighting_color: toFormValue(light.adaptive_front_lighting_color, lightDashFields, "adaptive_front_lighting_color"),
 
-        headlight_type: toFormValue(light.headlight_type, lightDashFields, "headlight_type"),
         headlight_washer_present: booleanToSelect(light.headlight_washer_present),
 
         left_34v_cd: toFormValue(light.left_34v_cd, lightDashFields, "left_34v_cd"),
@@ -621,6 +1005,7 @@ function mapProtocolToForm(data) {
         steering_lock_present: booleanToSelect(measurement.steering_lock_present),
         gas_equipment_present: booleanToSelect(measurement.gas_equipment_present),
         glonass_button_present: booleanToSelect(measurement.glonass_button_present),
+        pneumatic_suspension_present: booleanToSelect(measurement.pneumatic_suspension_present),
 
         tire_depth_fl_mm: toFormValue(measurement.tire_depth_fl_mm, measurementDashFields, "tire_depth_fl_mm"),
         tire_depth_rl_mm: toFormValue(measurement.tire_depth_rl_mm, measurementDashFields, "tire_depth_rl_mm"),
@@ -658,7 +1043,7 @@ function mapProtocolToForm(data) {
 }
 
 function buildProtocolPayload(form) {
-    return {
+    const payload = {
         protocol_number: formatProtocolNumber(form.protocol_number),
         appendix_number: emptyToNull(form.appendix_number),
         protocol_date: emptyToNull(form.protocol_date),
@@ -672,6 +1057,7 @@ function buildProtocolPayload(form) {
         vin: emptyToNull(form.vin),
         vehicle_category: emptyToNull(form.category),
         body_type: emptyToNull(form.body_type),
+        supercharger: emptyToNull(form.supercharger),
         wheel_marking_front: emptyToNull(form.tire_marking_front),
         wheel_marking_rear: emptyToNull(form.tire_marking_rear),
         tire_season: emptyToNull(form.tire_season),
@@ -680,27 +1066,33 @@ function buildProtocolPayload(form) {
         color: emptyToNull(form.color),
         dash_fields: buildDashFields(form, PROTOCOL_DASH_FIELDS),
     };
+
+    return normalizeNumericPayload(payload, PROTOCOL_NUMERIC_FIELDS);
 }
 
 function buildTestConditionsPayload(form) {
-    return {
+    const payload = {
         ambient_temperature_c: emptyToNull(form.ambient_temp_c),
         relative_humidity_pct: emptyToNull(form.ambient_humidity_pct),
         atmospheric_pressure_kpa: emptyToNull(form.atmospheric_pressure_kpa),
         dash_fields: buildDashFields(form, TEST_CONDITIONS_DASH_FIELDS),
     };
+
+    return normalizeNumericPayload(payload, TEST_CONDITIONS_NUMERIC_FIELDS);
 }
 
 function buildRoadConditionsPayload(form) {
-    return {
+    const payload = {
         road_ambient_temperature_c: emptyToNull(form.road_ambient_temp_c),
         road_relative_humidity_pct: emptyToNull(form.road_ambient_humidity_pct),
         dash_fields: buildDashFields(form, ROAD_CONDITIONS_DASH_FIELDS),
     };
+
+    return normalizeNumericPayload(payload, ROAD_CONDITIONS_NUMERIC_FIELDS);
 }
 
 function buildPowerSupplyPayload(form) {
-    return {
+    const payload = {
         frequency_hz: emptyToNull(form.electric_frequency_hz),
         phase_a_n_voltage_v: emptyToNull(form.voltage_phase_a_zero),
         phase_b_n_voltage_v: emptyToNull(form.voltage_phase_b_zero),
@@ -710,10 +1102,12 @@ function buildPowerSupplyPayload(form) {
         phase_ac_voltage_v: emptyToNull(form.voltage_phase_ac),
         dash_fields: buildDashFields(form, POWER_SUPPLY_DASH_FIELDS),
     };
+
+    return normalizeNumericPayload(payload, POWER_SUPPLY_NUMERIC_FIELDS);
 }
 
 function buildMeasurementPayload(form) {
-    return {
+    const payload = {
         mileage_km: emptyToNull(form.mileage_km),
 
         wheel_formula: emptyToNull(form.wheel_formula),
@@ -778,13 +1172,16 @@ function buildMeasurementPayload(form) {
         steering_lock_present: stringToBooleanOrNull(form.steering_lock_present),
         gas_equipment_present: stringToBooleanOrNull(form.gas_equipment_present),
         glonass_button_present: stringToBooleanOrNull(form.glonass_button_present),
+        pneumatic_suspension_present: stringToBooleanOrNull(form.pneumatic_suspension_present),
 
         dash_fields: buildDashFields(form, MEASUREMENT_DASH_FIELDS),
     };
+
+    return normalizeNumericPayload(payload, MEASUREMENT_NUMERIC_FIELDS);
 }
 
 function buildBrakePayload(form) {
-    return {
+    const payload = {
         service_brake_type: emptyToNull(form.service_brake_type),
         parking_brake_type: emptyToNull(form.parking_brake_type),
 
@@ -805,10 +1202,11 @@ function buildBrakePayload(form) {
 
         dash_fields: buildDashFields(form, BRAKE_DASH_FIELDS),
     };
+    return normalizeNumericPayload(payload, BRAKE_NUMERIC_FIELDS);
 }
 
 function buildLightPayload(form) {
-    return {
+    const payload = {
         low_beam_count: emptyToNull(form.low_beam_count),
         low_beam_color: emptyToNull(form.low_beam_color),
 
@@ -854,7 +1252,6 @@ function buildLightPayload(form) {
         adaptive_front_lighting_count: emptyToNull(form.adaptive_front_lighting_count),
         adaptive_front_lighting_color: emptyToNull(form.adaptive_front_lighting_color),
 
-        headlight_type: emptyToNull(form.headlight_type),
         headlight_washer_present: stringToBooleanOrNull(form.headlight_washer_present),
 
         left_34v_cd: emptyToNull(form.left_34v_cd),
@@ -890,11 +1287,14 @@ function buildLightPayload(form) {
 
         dash_fields: buildDashFields(form, LIGHT_DASH_FIELDS),
     };
+
+    return normalizeNumericPayload(payload, LIGHT_NUMERIC_FIELDS);
 }
 
-function ProtocolInspection() {
+function ProtocolInspection({measurementMode = false}) {
     const {id} = useParams();
     const navigate = useNavigate();
+    const location = useLocation();
 
     const currentProtocolId = id;
 
@@ -909,6 +1309,88 @@ function ProtocolInspection() {
     const [saving, setSaving] = useState(false);
     const [successMessage, setSuccessMessage] = useState("");
     const [errorMessage, setErrorMessage] = useState("");
+    const [blockErrors, setBlockErrors] = useState({});
+    const [catalogConfiguration, setCatalogConfiguration] = useState(null);
+    const [dataReviewOpen, setDataReviewOpen] = useState(
+        Boolean(location.state?.openDataReview)
+    );
+    const [dataReviewChoices, setDataReviewChoices] = useState({});
+
+    const headerRef = useRef(null);
+    const conditionsRef = useRef(null);
+    const vehicleRef = useRef(null);
+    const engineRef = useRef(null);
+    const steeringTransmissionRef = useRef(null);
+    const brakesRef = useRef(null);
+    const lightsMainRef = useRef(null);
+    const lightsGeometryRef = useRef(null);
+    const miscRef = useRef(null);
+
+    const scrollToBlock = (blockRef) => {
+        setTimeout(() => {
+            blockRef.current?.scrollIntoView({
+                behavior: "smooth",
+                block: "start",
+            });
+        }, 100);
+    };
+
+    const setBlockErrorAndScroll = (blockKey, blockRef, error) => {
+        const errorText = formatApiError(error.response?.data);
+
+        setBlockErrors((prev) => ({
+            ...prev,
+            [blockKey]: errorText,
+        }));
+
+        scrollToBlock(blockRef);
+    };
+
+    const getMeasurementErrorTarget = (error) => {
+        const errorFields = getErrorFields(error.response?.data);
+
+        if (hasAnyField(errorFields, MEASUREMENT_ENGINE_FIELDS)) {
+            return {
+                key: "engine",
+                ref: engineRef,
+            };
+        }
+
+        if (hasAnyField(errorFields, MEASUREMENT_STEERING_TRANSMISSION_FIELDS)) {
+            return {
+                key: "steeringTransmission",
+                ref: steeringTransmissionRef,
+            };
+        }
+
+        if (hasAnyField(errorFields, MEASUREMENT_MISC_FIELDS)) {
+            return {
+                key: "misc",
+                ref: miscRef,
+            };
+        }
+
+        return {
+            key: "vehicle",
+            ref: vehicleRef,
+        };
+    };
+
+    const getLightErrorTarget = (error) => {
+        const errorFields = getErrorFields(error.response?.data);
+
+        if (hasAnyField(errorFields, LIGHT_GEOMETRY_FIELDS)) {
+            return {
+                key: "lightsGeometry",
+                ref: lightsGeometryRef,
+            };
+        }
+
+        return {
+            key: "lightsMain",
+            ref: lightsMainRef,
+        };
+    };
 
     const handleChange = (e) => {
         const {name, value} = e.target;
@@ -942,7 +1424,7 @@ function ProtocolInspection() {
         }));
     };
 
-    const releaseProtocolLock = async () => {
+    const releaseProtocolLockOnUnload = useCallback(() => {
         if (!currentProtocolId) {
             return;
         }
@@ -951,33 +1433,35 @@ function ProtocolInspection() {
             return;
         }
 
-        if (formStatusRef.current === "completed") {
+        if (["approved", "cancelled"].includes(formStatusRef.current)) {
             return;
         }
 
+        protocolLockActiveRef.current = false;
+
+        const accessToken = localStorage.getItem("accessToken");
+        const baseUrl = api.client.defaults.baseURL || "";
+        const csrfToken = api.client.defaults.headers.common["X-CSRFToken"];
+
         try {
-            protocolLockActiveRef.current = false;
-
-            await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
-
-            formStatusRef.current = "draft";
-
-            setForm((prev) => ({
-                ...prev,
-                status: "draft",
-            }));
+            fetch(`${baseUrl}/cars/protocols/${currentProtocolId}/return-to-draft/`, {
+                method: "POST",
+                keepalive: true,
+                credentials: "include",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-Requested-With": "XMLHttpRequest",
+                    ...(csrfToken ? {"X-CSRFToken": csrfToken} : {}),
+                    ...(accessToken ? {Authorization: `Bearer ${accessToken}`} : {}),
+                },
+                body: JSON.stringify({}),
+            });
         } catch (error) {
-            console.error("Ошибка освобождения протокола:", error);
-
-            // Если запрос не прошёл, возвращаем флаг обратно,
-            // чтобы cleanup при размонтировании ещё раз попытался освободить протокол.
-            protocolLockActiveRef.current = true;
-
-            throw error;
+            console.error("Ошибка отправки keepalive-запроса при закрытии вкладки:", error);
         }
-    };
+    }, [currentProtocolId]);
 
-    const loadProtocol = async (
+    const loadProtocol = useCallback(async (
         protocolId = currentProtocolId,
         options = {}
     ) => {
@@ -992,11 +1476,9 @@ function ProtocolInspection() {
             let response = await api.get(`/cars/protocols/${protocolId}/full/`);
             let data = response.data;
 
-            if (startEditing && data.status !== "completed") {
+            if (startEditing && !["approved", "cancelled"].includes(data.status)) {
                 await api.post(`/cars/protocols/${protocolId}/start-editing/`);
-
                 protocolLockActiveRef.current = true;
-
                 response = await api.get(`/cars/protocols/${protocolId}/full/`);
                 data = response.data;
             }
@@ -1019,18 +1501,47 @@ function ProtocolInspection() {
             console.error("Ошибка загрузки протокола:", error);
 
             if (error.response?.status === 423) {
+                protocolLockActiveRef.current = false;
                 setErrorMessage(
                     `Протокол уже редактируется пользователем: ${
                         error.response.data?.locked_by_username || "неизвестно"
                     }`
                 );
             } else {
-                setErrorMessage("Не удалось загрузить данные протокола");
+                setErrorMessage(getApiErrorMessage(error, "Не удалось загрузить данные протокола"));
             }
         } finally {
             setLoading(false);
         }
-    };
+    }, [currentProtocolId]);
+
+    const releaseProtocolLock = useCallback(async () => {
+        if (!currentProtocolId) {
+            return;
+        }
+
+        if (!protocolLockActiveRef.current) {
+            return;
+        }
+
+        if (["approved", "cancelled"].includes(formStatusRef.current)) {
+            return;
+        }
+
+        try {
+            protocolLockActiveRef.current = false;
+
+            await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
+
+            await loadProtocol(currentProtocolId);
+        } catch (error) {
+            console.error("Ошибка освобождения протокола:", error);
+
+            protocolLockActiveRef.current = true;
+
+            throw error;
+        }
+    }, [currentProtocolId, loadProtocol]);
 
     useEffect(() => {
         if (id) {
@@ -1038,7 +1549,27 @@ function ProtocolInspection() {
         } else {
             setErrorMessage("Не передан ID протокола");
         }
-    }, [id]);
+    }, [id, loadProtocol]);
+
+    useEffect(() => {
+        if (!location.state?.openDataReview || !form.configuration_id) {
+            return;
+        }
+
+        api.get(`/cars/configurations/${form.configuration_id}/`)
+            .then((response) => {
+                setCatalogConfiguration(response.data);
+                setDataReviewOpen(true);
+                navigate(location.pathname, {
+                    replace: true,
+                    state: {...location.state, openDataReview: false},
+                });
+            })
+            .catch((error) => {
+                console.error("Ошибка загрузки данных Drom:", error);
+                setErrorMessage("Не удалось загрузить данные Drom для проверки");
+            });
+    }, [form.configuration_id, location.pathname, location.state, navigate]);
 
     useEffect(() => {
         formStatusRef.current = form.status;
@@ -1054,34 +1585,76 @@ function ProtocolInspection() {
                 return;
             }
 
-            if (formStatusRef.current === "completed") {
+            if (["approved", "cancelled", "review"].includes(formStatusRef.current)) {
                 return;
             }
 
-            protocolLockActiveRef.current = false;
+            releaseProtocolLock().catch((error) => {
+                console.error("Ошибка освобождения протокола при переходе со страницы:", error);
+            });
+        };
+    }, [currentProtocolId, releaseProtocolLock]);
 
-            api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`)
+    useEffect(() => {
+        const handlePageHide = () => {
+            releaseProtocolLockOnUnload();
+        };
+
+        const handleBeforeUnload = () => {
+            releaseProtocolLockOnUnload();
+        };
+
+        window.addEventListener("pagehide", handlePageHide);
+        window.addEventListener("beforeunload", handleBeforeUnload);
+
+        return () => {
+            window.removeEventListener("pagehide", handlePageHide);
+            window.removeEventListener("beforeunload", handleBeforeUnload);
+        };
+    }, [currentProtocolId, releaseProtocolLockOnUnload]);
+
+    useEffect(() => {
+        if (!currentProtocolId) {
+            return;
+        }
+
+        const heartbeatIntervalId = setInterval(() => {
+            if (!protocolLockActiveRef.current) {
+                return;
+            }
+
+            if (["approved", "cancelled"].includes(formStatusRef.current)) {
+                return;
+            }
+
+            api.post(`/cars/protocols/${currentProtocolId}/heartbeat/`)
                 .catch((error) => {
-                    console.error("Ошибка освобождения протокола при выходе:", error);
+                    if (error.response?.status === 403) {
+                        protocolLockActiveRef.current = false;
+                        setErrorMessage(
+                            "Редактирование остановлено: протокол занят другим пользователем."
+                        );
+                        return;
+                    }
+
+                    console.error("Ошибка heartbeat протокола:", error);
                 });
+        }, 30000);
+
+        return () => {
+            clearInterval(heartbeatIntervalId);
         };
     }, [currentProtocolId]);
 
     const handleSave = async (options = {}) => {
         const {showSuccessMessage = true} = options;
+        const activeForm = options.formOverride || form;
 
         try {
             setSaving(true);
             setSuccessMessage("");
             setErrorMessage("");
-
-            const protocolPayload = buildProtocolPayload(form);
-            const testConditionsPayload = buildTestConditionsPayload(form);
-            const roadConditionsPayload = buildRoadConditionsPayload(form);
-            const powerSupplyPayload = buildPowerSupplyPayload(form);
-            const measurementPayload = buildMeasurementPayload(form);
-            const brakePayload = buildBrakePayload(form);
-            const lightPayload = buildLightPayload(form);
+            setBlockErrors({});
 
             const protocolId = currentProtocolId;
 
@@ -1090,16 +1663,99 @@ function ProtocolInspection() {
                 return false;
             }
 
-            await api.patch(`/cars/protocols/${protocolId}/update/`, protocolPayload);
+            const numericErrors = validateProtocolNumericRanges(activeForm);
+            if (numericErrors.length) {
+                setErrorMessage(
+                    ["Исправьте числовые значения:", ...numericErrors.map(({message}) => message)].join("\n"),
+                );
+                window.requestAnimationFrame(() => {
+                    const invalidField = document.getElementById(numericErrors[0].fieldName);
+                    invalidField?.scrollIntoView({behavior: "smooth", block: "center"});
+                    invalidField?.focus({preventScroll: true});
+                });
+                return false;
+            }
 
-            await Promise.all([
-                api.patch(`/cars/protocols/${protocolId}/test-conditions/update/`, testConditionsPayload),
-                api.patch(`/cars/protocols/${protocolId}/road-conditions/update/`, roadConditionsPayload),
-                api.patch(`/cars/protocols/${protocolId}/power-supply/update/`, powerSupplyPayload),
-                api.patch(`/cars/protocols/${protocolId}/measurement/update/`, measurementPayload),
-                api.patch(`/cars/protocols/${protocolId}/brake/update/`, brakePayload),
-                api.patch(`/cars/protocols/${protocolId}/light/update/`, lightPayload),
-            ]);
+            const saveSteps = [
+                {
+                    key: "header",
+                    ref: headerRef,
+                    request: () =>
+                        api.patch(
+                            `/cars/protocols/${protocolId}/update/`,
+                            buildProtocolPayload(activeForm)
+                        ),
+                },
+                {
+                    key: "conditions",
+                    ref: conditionsRef,
+                    request: async () => {
+                        await api.patch(
+                            `/cars/protocols/${protocolId}/test-conditions/update/`,
+                            buildTestConditionsPayload(activeForm)
+                        );
+
+                        await api.patch(
+                            `/cars/protocols/${protocolId}/road-conditions/update/`,
+                            buildRoadConditionsPayload(activeForm)
+                        );
+
+                        await api.patch(
+                            `/cars/protocols/${protocolId}/power-supply/update/`,
+                            buildPowerSupplyPayload(activeForm)
+                        );
+                    },
+                },
+                {
+                    key: "vehicle",
+                    ref: vehicleRef,
+                    getErrorTarget: getMeasurementErrorTarget,
+                    request: () =>
+                        api.patch(
+                            `/cars/protocols/${protocolId}/measurement/update/`,
+                            buildMeasurementPayload(activeForm)
+                        ),
+                },
+                {
+                    key: "brakes",
+                    ref: brakesRef,
+                    request: () =>
+                        api.patch(
+                            `/cars/protocols/${protocolId}/brake/update/`,
+                            buildBrakePayload(activeForm)
+                        ),
+                },
+                {
+                    key: "lightsMain",
+                    ref: lightsMainRef,
+                    getErrorTarget: getLightErrorTarget,
+                    request: () =>
+                        api.patch(
+                            `/cars/protocols/${protocolId}/light/update/`,
+                            buildLightPayload(activeForm)
+                        ),
+                },
+            ];
+
+            for (const step of saveSteps) {
+                try {
+                    await step.request();
+                } catch (error) {
+                    console.error(`Ошибка сохранения блока ${step.key}:`, error);
+
+                    const target = step.getErrorTarget
+                        ? step.getErrorTarget(error)
+                        : {
+                            key: step.key,
+                            ref: step.ref,
+                        };
+
+                    setBlockErrorAndScroll(target.key, target.ref, error);
+                    setErrorMessage("Ошибка при сохранении данных. Проверьте выделенный блок.");
+
+                    return false;
+                }
+            }
 
             await loadProtocol(protocolId);
 
@@ -1124,7 +1780,9 @@ function ProtocolInspection() {
         }
 
         const confirmed = window.confirm(
-            "Завершить протокол? После этого он исчезнет из списка протоколов в работе и появится в завершённых."
+            measurementMode
+                ? "Передать протокол оператору? После этого замерщик больше не сможет его редактировать."
+                : "Отправить протокол на проверку? После этого он перейдёт руководителю."
         );
 
         if (!confirmed) {
@@ -1136,24 +1794,27 @@ function ProtocolInspection() {
             setSuccessMessage("");
             setErrorMessage("");
 
-            const protocolPayload = {
-                ...buildProtocolPayload(form),
-                status: "completed",
-            };
+            const transitionPath = measurementMode
+                ? "submit-to-operator"
+                : "submit-for-review";
 
-            await api.patch(`/cars/protocols/${currentProtocolId}/update/`, protocolPayload);
+            await api.post(`/cars/protocols/${currentProtocolId}/${transitionPath}/`);
 
             protocolLockActiveRef.current = false;
-            formStatusRef.current = "completed";
+            formStatusRef.current = measurementMode ? "operator" : "review";
 
             setForm((prev) => ({
                 ...prev,
-                status: "completed",
+                status: measurementMode ? "operator" : "review",
             }));
 
-            setSuccessMessage("Протокол переведён в статус «Завершён»");
+            setSuccessMessage(
+                measurementMode
+                    ? "Протокол передан оператору"
+                    : "Протокол отправлен на проверку"
+            );
 
-            navigate("/protocols/completed");
+            navigate(measurementMode ? "/home" : "/protocols");
         } catch (error) {
             console.error("Ошибка завершения протокола:", error);
             setErrorMessage("Не удалось завершить протокол");
@@ -1168,8 +1829,9 @@ function ProtocolInspection() {
             return;
         }
 
+        const isFinalized = ["approved", "cancelled"].includes(form.status);
         const confirmed = window.confirm(
-            "Вернуть протокол в черновик? После этого он снова появится в списке протоколов в работе."
+            "Вернуть протокол на этап оформления оператором?"
         );
 
         if (!confirmed) {
@@ -1183,12 +1845,15 @@ function ProtocolInspection() {
 
             await api.post(`/cars/protocols/${currentProtocolId}/return-to-draft/`);
 
-            protocolLockActiveRef.current = false;
-            formStatusRef.current = "draft";
+            protocolLockActiveRef.current = isFinalized;
+            formStatusRef.current = isFinalized ? "operator" : "draft";
+            if (isFinalized) {
+                setForm((previous) => ({...previous, status: "operator"}));
+            }
 
             await loadProtocol(currentProtocolId);
 
-            setSuccessMessage("Протокол возвращён в черновик");
+            setSuccessMessage("Протокол возвращён на этап оформления оператором");
         } catch (error) {
             console.error("Ошибка возврата протокола в черновик:", error);
             setErrorMessage("Не удалось вернуть протокол в черновик");
@@ -1197,7 +1862,7 @@ function ProtocolInspection() {
         }
     };
 
-    const handleGenerateDocx = async () => {
+    const handleGenerateDocx = async (templateVariant) => {
         if (!currentProtocolId) {
             setErrorMessage("Сначала сохраните протокол");
             return;
@@ -1215,7 +1880,10 @@ function ProtocolInspection() {
             setErrorMessage("");
             setSuccessMessage("Данные сохранены, формируется DOCX...");
 
-            const response = await api.generateProtocolDocx(currentProtocolId);
+            const response = await api.generateProtocolDocx(
+                currentProtocolId,
+                templateVariant,
+            );
 
             const blob = new Blob([response.data], {
                 type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1224,22 +1892,69 @@ function ProtocolInspection() {
             const url = window.URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.href = url;
-            link.download = `protocol_${currentProtocolId}.docx`;
+            link.download = `protocol_${currentProtocolId}_${templateVariant}.docx`;
             document.body.appendChild(link);
             link.click();
             link.remove();
             window.URL.revokeObjectURL(url);
 
-            setSuccessMessage("DOCX успешно сформирован");
+            setSuccessMessage(
+                `DOCX по ${templateVariant === "old" ? "старому" : "новому"} шаблону сформирован`,
+            );
         } catch (error) {
             console.error("Ошибка генерации DOCX:", error);
             setErrorMessage("Не удалось сформировать DOCX");
         }
     };
 
+    const handlePreviewPdf = async () => {
+        if (!currentProtocolId) {
+            setErrorMessage("Сначала сохраните протокол");
+            return;
+        }
+
+        const previewWindow = window.open("about:blank", "_blank");
+
+        if (!previewWindow) {
+            setErrorMessage("Браузер заблокировал новую вкладку предпросмотра");
+            return;
+        }
+
+        const saved = await handleSave({
+            showSuccessMessage: false,
+        });
+
+        if (!saved) {
+            previewWindow.close();
+            return;
+        }
+
+        try {
+            setErrorMessage("");
+            setSuccessMessage("Данные сохранены, формируется предпросмотр PDF...");
+
+            const response = await api.previewProtocolPdf(currentProtocolId);
+            const blob = new Blob([response.data], {type: "application/pdf"});
+            const url = window.URL.createObjectURL(blob);
+
+            previewWindow.location.href = url;
+            window.setTimeout(() => window.URL.revokeObjectURL(url), 60_000);
+            setSuccessMessage("Предпросмотр PDF открыт в новой вкладке");
+        } catch (error) {
+            console.error("Ошибка предпросмотра PDF:", error);
+            previewWindow.close();
+            setErrorMessage(
+                error.response?.status === 503
+                    ? "Предпросмотр недоступен: LibreOffice не установлен на сервере"
+                    : "Не удалось открыть предпросмотр PDF"
+            );
+        }
+    };
+
     const commonSectionProps = {
         form,
         handleChange,
+        measurementMode,
         textFieldSx,
         selectFieldSx,
         sectionPaperSx,
@@ -1247,7 +1962,210 @@ function ProtocolInspection() {
         subsectionTitleSx,
     };
 
-    const isCompleted = form.status === "completed";
+    const isFinal = ["approved", "cancelled"].includes(form.status);
+    const isOperatorStage = !measurementMode && ["operator", "revision"].includes(form.status);
+    const dataReviewRows = [
+        {
+            key: "front_tires",
+            label: "Передние шины",
+            catalog: catalogConfiguration?.front_tires,
+            measured: form.tire_marking_front,
+            formField: "tire_marking_front",
+        },
+        {
+            key: "rear_tires",
+            label: "Задние шины",
+            catalog: catalogConfiguration?.rear_tires,
+            measured: form.tire_marking_rear,
+            formField: "tire_marking_rear",
+        },
+        {
+            key: "fuel_type",
+            label: "Топливо",
+            catalog: catalogConfiguration?.fuel_type,
+            measured: form.fuel_type,
+            formField: "fuel_type",
+        },
+        {
+            key: "drive_type",
+            label: "Привод",
+            catalog: catalogConfiguration?.drive_type,
+            measured: form.wheel_formula,
+            formField: "wheel_formula",
+        },
+        {
+            key: "transmission",
+            label: "Коробка передач",
+            catalog: catalogConfiguration?.transmission,
+            measured: form.transmission_type,
+            formField: "transmission_type",
+        },
+        {
+            key: "seats_count",
+            label: "Количество мест",
+            catalog: catalogConfiguration?.seats_count,
+            measured: form.seats_count,
+            formField: "seats_count",
+        },
+        {
+            key: "body_type",
+            label: "Тип / код кузова",
+            catalog: catalogConfiguration?.body_mark || catalogConfiguration?.body_type,
+            measured: form.body_type,
+            formField: "body_type",
+        },
+        {
+            key: "manufacture_year",
+            label: "Год выпуска",
+            catalog: catalogConfiguration?.manufacture_year,
+            measured: form.manufacture_year,
+            formField: "manufacture_year",
+        },
+        {
+            key: "engine_model",
+            label: "Модель двигателя",
+            catalog: catalogConfiguration?.engine_model,
+            measured: form.engine_model,
+            formField: "engine_model",
+        },
+        {
+            key: "engine_power_kw",
+            label: "Мощность двигателя, кВт",
+            catalog: catalogConfiguration?.engine_power_kw,
+            measured: form.engine_power_kw,
+            formField: "engine_power_kw",
+        },
+        {
+            key: "cylinder_layout",
+            label: "Расположение цилиндров",
+            catalog: catalogConfiguration?.cylinder_layout,
+            measured: form.cylinder_layout,
+            formField: "cylinder_layout",
+        },
+        {
+            key: "cylinders_count",
+            label: "Количество цилиндров",
+            catalog: catalogConfiguration?.cylinders_count,
+            measured: form.cylinders_count,
+            formField: "cylinders_count",
+        },
+        {
+            key: "turbo_present",
+            label: "Турбонаддув",
+            catalog: catalogConfiguration?.turbo_present,
+            measured: form.turbo_present,
+            formField: "turbo_present",
+        },
+        {
+            key: "vehicle_length_mm",
+            label: "Длина по данным Drom, мм",
+            catalog: catalogConfiguration?.vehicle_length_mm,
+            measured: form.vehicle_length_mm,
+            formField: "vehicle_length_mm",
+        },
+        {
+            key: "vehicle_width_mm",
+            label: "Ширина по данным Drom, мм",
+            catalog: catalogConfiguration?.vehicle_width_mm,
+            measured: form.vehicle_width_mm,
+            formField: "vehicle_width_mm",
+        },
+        {
+            key: "vehicle_height_mm",
+            label: "Высота по данным Drom, мм",
+            catalog: catalogConfiguration?.vehicle_height_mm,
+            measured: form.vehicle_height_mm,
+            formField: "vehicle_height_mm",
+        },
+        {
+            key: "vehicle_weight_kg",
+            label: "Масса по данным Drom, кг",
+            catalog: catalogConfiguration?.vehicle_weight_kg,
+            measured: form.vehicle_weight_kg,
+            formField: "vehicle_weight_kg",
+        },
+    ];
+
+    const handleDataReviewSave = async () => {
+        const nextForm = {...form};
+        const selectedValues = {};
+
+        dataReviewRows.forEach((row) => {
+            const selectedSource = dataReviewChoices[row.key] || "catalog";
+            const sourceValue = selectedSource === "measured" ? row.measured : row.catalog;
+            if (sourceValue === null || sourceValue === undefined || sourceValue === "") return;
+
+            const normalizedValue = normalizeCatalogReviewValue(row.key, sourceValue);
+            nextForm[row.formField] = normalizedValue;
+            selectedValues[row.key] = normalizedValue;
+        });
+
+        setForm(nextForm);
+        setSaving(true);
+        setErrorMessage("");
+        setSuccessMessage("");
+
+        try {
+            const protocolPayload = buildProtocolPayload(nextForm);
+            const protocolFieldMap = {
+                front_tires: "wheel_marking_front",
+                rear_tires: "wheel_marking_rear",
+                body_type: "body_type",
+            };
+            const protocolUpdate = Object.fromEntries(
+                Object.entries(protocolFieldMap)
+                    .filter(([reviewKey]) => reviewKey in selectedValues)
+                    .map(([, apiField]) => [apiField, protocolPayload[apiField]])
+            );
+
+            if (Object.keys(protocolUpdate).length) {
+                protocolUpdate.dash_fields = protocolPayload.dash_fields;
+                await api.patch(
+                    `/cars/protocols/${currentProtocolId}/update/`,
+                    protocolUpdate
+                );
+            }
+
+            const measurementPayload = buildMeasurementPayload(nextForm);
+            const measurementFieldMap = {
+                fuel_type: "fuel_type",
+                drive_type: "wheel_formula",
+                transmission: "transmission_type",
+                seats_count: "seats_count",
+                engine_model: "engine_model",
+                engine_power_kw: "engine_power_kw",
+                cylinder_layout: "cylinder_layout",
+                cylinders_count: "cylinders_count",
+                turbo_present: "turbo_present",
+                vehicle_length_mm: "vehicle_length_mm",
+                vehicle_width_mm: "vehicle_width_mm",
+                vehicle_height_mm: "vehicle_height_mm",
+                vehicle_weight_kg: "vehicle_weight_kg",
+            };
+            const measurementUpdate = Object.fromEntries(
+                Object.entries(measurementFieldMap)
+                    .filter(([reviewKey]) => reviewKey in selectedValues)
+                    .map(([, apiField]) => [apiField, measurementPayload[apiField]])
+            );
+
+            if (Object.keys(measurementUpdate).length) {
+                measurementUpdate.dash_fields = measurementPayload.dash_fields;
+                await api.patch(
+                    `/cars/protocols/${currentProtocolId}/measurement/update/`,
+                    measurementUpdate
+                );
+            }
+
+            setDataReviewOpen(false);
+            setSuccessMessage("Проверка данных сохранена");
+            await loadProtocol(currentProtocolId);
+        } catch (error) {
+            console.error("Ошибка сохранения результатов проверки:", error);
+            setErrorMessage(getApiErrorMessage(error, "Не удалось сохранить результаты проверки"));
+        } finally {
+            setSaving(false);
+        }
+    };
     const actionButtons = (
         <Box
             sx={{
@@ -1260,28 +2178,72 @@ function ProtocolInspection() {
                 },
             }}
         >
-            <Button
-                variant="outlined"
-                onClick={handleGenerateDocx}
+            {!measurementMode && <Button
+                variant="contained"
+                onClick={handlePreviewPdf}
                 disabled={!currentProtocolId || saving || loading}
                 sx={{
-                    borderColor: "black",
-                    color: "black",
+                    bgcolor: "black",
+                    color: "white",
                     borderRadius: 0,
                     textTransform: "none",
                     px: 3,
                     py: 1,
                     fontWeight: 800,
+                    boxShadow: "none",
                     "&:hover": {
-                        borderColor: "black",
-                        bgcolor: "#eeeeee",
+                        bgcolor: "#222",
+                        boxShadow: "none",
                     },
                 }}
             >
-                {saving ? "Сохранение..." : "Сформировать DOCX"}
-            </Button>
+                {saving ? "Сохранение..." : "Предпросмотр PDF"}
+            </Button>}
 
-            {isCompleted ? (
+            {!measurementMode && <>
+                <Button
+                    variant="outlined"
+                    onClick={() => handleGenerateDocx("old")}
+                    disabled={!currentProtocolId || saving || loading}
+                    sx={{
+                        borderColor: "black",
+                        color: "black",
+                        borderRadius: 0,
+                        textTransform: "none",
+                        px: 3,
+                        py: 1,
+                        fontWeight: 800,
+                        "&:hover": {
+                            borderColor: "black",
+                            bgcolor: "#eeeeee",
+                        },
+                    }}
+                >
+                    {saving ? "Сохранение..." : "DOCX: старый шаблон"}
+                </Button>
+                <Button
+                    variant="outlined"
+                    onClick={() => handleGenerateDocx("v6")}
+                    disabled={!currentProtocolId || saving || loading}
+                    sx={{
+                        borderColor: "#5f6b2f",
+                        color: "#414a20",
+                        borderRadius: 0,
+                        textTransform: "none",
+                        px: 3,
+                        py: 1,
+                        fontWeight: 800,
+                        "&:hover": {
+                            borderColor: "#414a20",
+                            bgcolor: "#f1f2e9",
+                        },
+                    }}
+                >
+                    {saving ? "Сохранение..." : "DOCX: новый шаблон v6"}
+                </Button>
+            </>}
+
+            {isFinal ? (
                 <Button
                     variant="contained"
                     onClick={handleReturnToDraft}
@@ -1302,7 +2264,7 @@ function ProtocolInspection() {
                         },
                     }}
                 >
-                    Вернуть в черновик
+                    Освободить протокол
                 </Button>
             ) : (
                 <Button
@@ -1324,7 +2286,11 @@ function ProtocolInspection() {
                         },
                     }}
                 >
-                    Завершить протокол
+                    {saving
+                        ? "Сохранение..."
+                        : measurementMode
+                            ? "Передать оператору"
+                            : "Отправить на проверку"}
                 </Button>
             )}
 
@@ -1354,6 +2320,92 @@ function ProtocolInspection() {
 
     return (
         <>
+            <Dialog
+                open={dataReviewOpen && Boolean(catalogConfiguration)}
+                onClose={() => setDataReviewOpen(false)}
+                maxWidth="lg"
+                fullWidth
+            >
+                <DialogTitle sx={{fontWeight: 800}}>
+                    Проверка данных автомобиля
+                </DialogTitle>
+                <DialogContent dividers>
+                    {errorMessage && (
+                        <Alert severity="error" sx={{mb: 2, borderRadius: 0, whiteSpace: "pre-line"}}>
+                            {errorMessage}
+                        </Alert>
+                    )}
+                    <Typography variant="body2" sx={{mb: 2, color: "text.secondary"}}>
+                        Сравните данные каталога Drom с фактическими данными замерщика.
+                    </Typography>
+                    <Box sx={{display: "grid", gap: 1}}>
+                        <Box
+                            sx={{
+                                display: "grid",
+                                gridTemplateColumns: "1.2fr 1fr 1fr 1.2fr",
+                                gap: 1,
+                                fontWeight: 800,
+                                px: 1,
+                            }}
+                        >
+                            <Typography>Параметр</Typography>
+                            <Typography>Drom</Typography>
+                            <Typography>Замерщик</Typography>
+                            <Typography>Итог</Typography>
+                        </Box>
+                        {dataReviewRows.map((row) => {
+                            const catalogValue = formatReviewValue(row.key, row.catalog);
+                            const measuredValue = formatReviewValue(row.key, row.measured);
+                            const same = areReviewValuesEqual(row.key, row.catalog, row.measured);
+                            const choice = dataReviewChoices[row.key] || "catalog";
+
+                            return (
+                                <Box
+                                    key={row.key}
+                                    sx={{
+                                        display: "grid",
+                                        gridTemplateColumns: "1.2fr 1fr 1fr 1.2fr",
+                                        gap: 1,
+                                        alignItems: "center",
+                                        border: "1px solid #ddd",
+                                        p: 1,
+                                        bgcolor: same ? "#f7fff7" : "#fffaf0",
+                                    }}
+                                >
+                                    <Typography sx={{fontWeight: 700}}>{row.label}</Typography>
+                                    <Typography variant="body2">{catalogValue}</Typography>
+                                    <Typography variant="body2">{measuredValue}</Typography>
+                                    {same ? (
+                                        <Chip label="Совпадает" size="small" sx={{borderRadius: 0, bgcolor: "#d9f2d9", color: "black", width: "fit-content"}} />
+                                    ) : (
+                                        <TextField
+                                            select
+                                            size="small"
+                                            value={choice}
+                                            label="Выбрать"
+                                            onChange={(event) => setDataReviewChoices((previous) => ({
+                                                ...previous,
+                                                [row.key]: event.target.value,
+                                            }))}
+                                        >
+                                            <MenuItem value="catalog">Drom</MenuItem>
+                                            <MenuItem value="measured">Замерщик</MenuItem>
+                                        </TextField>
+                                    )}
+                                </Box>
+                            );
+                        })}
+                    </Box>
+                </DialogContent>
+                <DialogActions sx={{p: 2}}>
+                    <Button onClick={() => setDataReviewOpen(false)} sx={{color: "black", textTransform: "none"}}>
+                        Позже
+                    </Button>
+                    <Button onClick={handleDataReviewSave} disabled={saving} variant="contained" sx={{bgcolor: "black", borderRadius: 0, textTransform: "none", boxShadow: "none", "&:hover": {bgcolor: "#222", boxShadow: "none"}}}>
+                        {saving ? "Сохранение..." : "Сохранить результаты проверки"}
+                    </Button>
+                </DialogActions>
+            </Dialog>
             <AppHeader beforeNavigate={releaseProtocolLock}/>
 
             <Box sx={pageSx}>
@@ -1377,7 +2429,7 @@ function ProtocolInspection() {
                                     mb: 0.8,
                                 }}
                             >
-                                Осмотр автомобиля
+                                {measurementMode ? "Ввод данных замерщика" : "Осмотр автомобиля"}
                             </Typography>
 
                             <Typography
@@ -1387,10 +2439,68 @@ function ProtocolInspection() {
                                     mb: 1.5,
                                 }}
                             >
-                                Заполнение данных осмотра, условий испытаний, фотографий и результатов замеров.
+                                {measurementMode
+                                    ? "Заполните доступные данные и передайте протокол оператору."
+                                    : "Заполнение данных осмотра, условий испытаний, фотографий и результатов замеров."}
                             </Typography>
 
-                            <Box
+                            {measurementMode && (
+                                <Box
+                                    sx={{
+                                        display: "flex",
+                                        alignItems: "center",
+                                        gap: 1,
+                                        flexWrap: "wrap",
+                                    }}
+                                >
+                                    <Chip
+                                        label="Этап 1 из 2"
+                                        sx={{
+                                            borderRadius: 0,
+                                            bgcolor: "black",
+                                            color: "white",
+                                            fontWeight: 800,
+                                        }}
+                                    />
+                                    <Typography variant="body2" sx={{fontWeight: 700}}>
+                                        После передачи протокол продолжит оператор
+                                    </Typography>
+                                </Box>
+                            )}
+
+                            {isOperatorStage && (
+                                <Box sx={{display: "grid", gap: 1, maxWidth: 760}}>
+                                    <Box
+                                        sx={{
+                                            display: "flex",
+                                            alignItems: "center",
+                                            gap: 1,
+                                            flexWrap: "wrap",
+                                        }}
+                                    >
+                                        <Chip
+                                            label="Этап 2 из 2"
+                                            sx={{
+                                                borderRadius: 0,
+                                                bgcolor: "black",
+                                                color: "white",
+                                                fontWeight: 800,
+                                            }}
+                                        />
+                                        <Typography variant="body2" sx={{fontWeight: 700}}>
+                                            Выберите поколение и конфигурацию, затем заполните протокол
+                                        </Typography>
+                                    </Box>
+
+                                    {form.status === "revision" && form.revision_comment && (
+                                        <Alert severity="error" sx={{borderRadius: 0}}>
+                                            <b>Что нужно исправить:</b> {form.revision_comment}
+                                        </Alert>
+                                    )}
+                                </Box>
+                            )}
+
+                            {!measurementMode && <Box
                                 sx={{
                                     display: "flex",
                                     gap: 1,
@@ -1432,7 +2542,7 @@ function ProtocolInspection() {
                                         fontWeight: 800,
                                     }}
                                 />
-                            </Box>
+                            </Box>}
                         </Box>
 
                         {actionButtons}
@@ -1468,14 +2578,62 @@ function ProtocolInspection() {
                             sx={{
                                 mb: 2,
                                 borderRadius: 0,
+                                whiteSpace: "pre-line",
                             }}
                         >
                             {errorMessage}
                         </Alert>
                     )}
 
-                    <ProtocolInspectionHeader {...commonSectionProps} />
-                    <ProtocolInspectionConditions {...commonSectionProps} />
+                    {!measurementMode && ["operator", "revision"].includes(form.status) && (
+                        <Box
+                            sx={{
+                                mb: 2,
+                                p: 2,
+                                border: "2px solid black",
+                                bgcolor: "white",
+                            }}
+                        >
+                            <Typography variant="h6" sx={{fontWeight: 800, mb: 1.5}}>
+                                Автомобиль для протокола
+                            </Typography>
+                            <Typography variant="body2" sx={{mb: 1.5, color: "text.secondary"}}>
+                                Откройте отдельный экран с фотографиями, регионами и характеристиками поколений.
+                            </Typography>
+                            <Button
+                                variant="contained"
+                                onClick={() => navigate(`/protocols/${currentProtocolId}/vehicle-selection`)}
+                                sx={{
+                                    bgcolor: "black",
+                                    color: "white",
+                                    borderRadius: 0,
+                                    textTransform: "none",
+                                    fontWeight: 800,
+                                    boxShadow: "none",
+                                    "&:hover": {bgcolor: "#222", boxShadow: "none"},
+                                }}
+                            >
+                                Открыть выбор поколения и конфигурации
+                            </Button>
+                            {(form.generation_id || form.configuration_id) && (
+                                <Typography variant="body2" sx={{mt: 1, fontWeight: 700}}>
+                                    Выбор уже сохранён. Его можно изменить на отдельной странице.
+                                </Typography>
+                            )}
+                        </Box>
+                    )}
+
+                    {!measurementMode && (
+                        <Box ref={headerRef}>
+                            <BlockError message={blockErrors.header}/>
+                            <ProtocolInspectionHeader {...commonSectionProps} />
+                        </Box>
+                    )}
+
+                    <Box ref={conditionsRef}>
+                        <BlockError message={blockErrors.conditions}/>
+                        <ProtocolInspectionConditions {...commonSectionProps} />
+                    </Box>
 
                     <ProtocolInspectionPhotos
                         {...commonSectionProps}
@@ -1484,25 +2642,52 @@ function ProtocolInspection() {
                         setPhotos={setPhotos}
                     />
 
-                    <ProtocolInspectionVehicle {...commonSectionProps} />
-                    <ProtocolInspectionEngine {...commonSectionProps} />
-                    <ProtocolInspectionSteeringTransmission {...commonSectionProps} />
-                    <ProtocolInspectionBrakes {...commonSectionProps} />
-                    <ProtocolInspectionLightsMain {...commonSectionProps} />
-                    <ProtocolInspectionLightsGeometry {...commonSectionProps} />
-                    <ProtocolInspectionMisc {...commonSectionProps} />
+                    <Box ref={vehicleRef}>
+                        <BlockError message={blockErrors.vehicle}/>
+                        <ProtocolInspectionVehicle {...commonSectionProps} />
+                    </Box>
+
+                    <Box ref={engineRef}>
+                        <BlockError message={blockErrors.engine}/>
+                        <ProtocolInspectionEngine {...commonSectionProps} />
+                    </Box>
+
+                    <Box ref={steeringTransmissionRef}>
+                        <BlockError message={blockErrors.steeringTransmission}/>
+                        <ProtocolInspectionSteeringTransmission {...commonSectionProps} />
+                    </Box>
+
+                    <Box ref={brakesRef}>
+                        <BlockError message={blockErrors.brakes}/>
+                        <ProtocolInspectionBrakes {...commonSectionProps} />
+                    </Box>
+
+                    <Box ref={lightsMainRef}>
+                        <BlockError message={blockErrors.lightsMain}/>
+                        <ProtocolInspectionLightsMain {...commonSectionProps} />
+                    </Box>
+
+                    <Box ref={lightsGeometryRef}>
+                        <BlockError message={blockErrors.lightsGeometry}/>
+                        <ProtocolInspectionLightsGeometry {...commonSectionProps} />
+                    </Box>
+
+                    <Box ref={miscRef}>
+                        <BlockError message={blockErrors.misc}/>
+                        <ProtocolInspectionMisc {...commonSectionProps} />
+                    </Box>
 
                     <Box
                         sx={{
-                            position: "sticky",
-                            bottom: 0,
+                            position: {xs: "static", md: "sticky"},
+                            bottom: {xs: "auto", md: 0},
                             display: "flex",
                             justifyContent: "flex-end",
                             mt: 2,
-                            py: 2,
+                            py: {xs: 1.5, md: 2},
                             bgcolor: "#f2f2f2",
                             borderTop: "2px solid black",
-                            zIndex: 10,
+                            zIndex: {xs: "auto", md: 10},
                         }}
                     >
                         {actionButtons}

@@ -9,24 +9,34 @@ https://docs.djangoproject.com/en/5.2/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
+import os
 from datetime import timedelta
 from pathlib import Path
 
 from django.conf.global_settings import CSRF_TRUSTED_ORIGINS, CSRF_COOKIE_SAMESITE, CSRF_COOKIE_HTTPONLY
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+load_dotenv(BASE_DIR.parent / '.env')
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-lq(0)^fv!ks)w+i*3@=&-o!#($2qz-@ct$1=atrah4!c8(-&#j'
+SECRET_KEY = os.environ['DJANGO_SECRET_KEY']
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DJANGO_DEBUG', 'false').lower() in {'1', 'true', 'yes'}
 
-ALLOWED_HOSTS = []
+
+def env_list(name, default):
+    return [value.strip() for value in os.getenv(name, default).split(',') if value.strip()]
+
+ALLOWED_HOSTS = env_list(
+    'DJANGO_ALLOWED_HOSTS',
+    '127.0.0.1,localhost,192.168.0.105',
+)
 
 # Application definition
 
@@ -51,6 +61,7 @@ REST_FRAMEWORK = {
         'rest_framework.authentication.SessionAuthentication',
         'rest_framework_simplejwt.authentication.JWTAuthentication',
     ],
+    'EXCEPTION_HANDLER': 'cars.api_errors.exception_handler',
 }
 
 SIMPLE_JWT = {
@@ -71,10 +82,10 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
-CORS_ALLOWED_ORIGINS = [
-    'http://localhost:3000',
-    'http://127.0.0.1:3000',
-]
+CORS_ALLOWED_ORIGINS = env_list(
+    'CORS_ALLOWED_ORIGINS',
+    'http://localhost:3000,http://127.0.0.1:3000,http://192.168.0.105:3000',
+)
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -129,11 +140,11 @@ WSGI_APPLICATION = 'main.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'cars',
-        'USER': 'root',
-        'PASSWORD': '789789456qweQ$',
-        'HOST': 'localhost',
-        'PORT': '3306',
+        'NAME': os.getenv('MYSQL_DATABASE', 'cars'),
+        'USER': os.getenv('MYSQL_USER', 'protocol_user'),
+        'PASSWORD': os.environ['MYSQL_PASSWORD'],
+        'HOST': os.getenv('MYSQL_HOST', 'localhost'),
+        'PORT': os.getenv('MYSQL_PORT', '3306'),
         'OPTIONS': {
             'init_command': "SET sql_mode='STRICT_TRANS_TABLES'",
         }

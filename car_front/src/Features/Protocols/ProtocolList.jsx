@@ -1,6 +1,8 @@
-import {useEffect, useMemo, useState} from "react";
+import {useCallback, useEffect, useMemo, useState} from "react";
 import {useNavigate} from "react-router-dom";
 import api from "../../shared/api.jsx";
+import {baseURL} from "../../shared/config.jsx";
+import {getApiErrorMessage} from "../../shared/errorHandler.jsx";
 
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -17,12 +19,14 @@ import AppHeader from "../AppHeader/AppHeader.jsx";
 
 function getStatusText(status) {
     switch (status) {
-        case "draft":
-            return "Черновик";
-        case "in_progress":
-            return "В работе";
-        case "completed":
-            return "Завершён";
+        case "measurement":
+            return "У замерщика";
+        case "operator":
+            return "У оператора";
+        case "review":
+            return "На проверке";
+        case "revision":
+            return "На доработке";
         case "approved":
             return "Утверждён";
         case "cancelled":
@@ -33,7 +37,7 @@ function getStatusText(status) {
 }
 
 function getStatusChipSx(status) {
-    if (status === "completed") {
+    if (status === "review") {
         return {
             bgcolor: "black",
             color: "white",
@@ -42,7 +46,7 @@ function getStatusChipSx(status) {
         };
     }
 
-    if (status === "in_progress") {
+    if (status === "operator" || status === "measurement" || status === "revision") {
         return {
             bgcolor: "black",
             color: "white",
@@ -51,7 +55,7 @@ function getStatusChipSx(status) {
         };
     }
 
-    if (status === "draft") {
+    if (status === "measurement") {
         return {
             bgcolor: "white",
             color: "black",
@@ -71,16 +75,20 @@ function getStatusChipSx(status) {
 }
 
 function getWebSocketUrl() {
-    const wsProtocol = window.location.protocol === "https:" ? "wss" : "ws";
+    const backendUrl = new URL(baseURL);
+    const wsProtocol = backendUrl.protocol === "https:" ? "wss:" : "ws:";
 
-    if (
-        window.location.hostname === "localhost" ||
-        window.location.hostname === "127.0.0.1"
-    ) {
-        return `${wsProtocol}://127.0.0.1:8000/ws/protocols/`;
+    return `${wsProtocol}//${backendUrl.host}/ws/protocols/`;
+}
+
+function createProtocolWebSocket() {
+    const accessToken = localStorage.getItem("accessToken");
+
+    if (!accessToken) {
+        return null;
     }
 
-    return `${wsProtocol}://${window.location.host}/ws/protocols/`;
+    return new WebSocket(getWebSocketUrl(), ["jwt", accessToken]);
 }
 
 function getProtocolTitle(protocol) {
@@ -100,7 +108,7 @@ function ProtocolCard({
                           canManageProtocols,
                           showReviewActions,
                       }) {
-    const isLocked = protocol.status === "in_progress";
+    const isLocked = Boolean(protocol.locked_by_id || protocol.locked_by);
     const isReturnedForRevision = Boolean(protocol.returned_for_revision);
 
     return (
@@ -273,7 +281,7 @@ function ProtocolCard({
                         Освободить
                     </Button>
                 )}
-                {showReviewActions && canManageProtocols && protocol.status === "completed" && (
+                {showReviewActions && canManageProtocols && protocol.status === "review" && (
                     <>
                         <Button
                             variant="contained"
@@ -339,9 +347,9 @@ function ProtocolList({
     const [searchQuery, setSearchQuery] = useState("");
     const [currentUser, setCurrentUser] = useState(null);
 
-    const showReviewActions = statuses.includes("completed");
+    const showReviewActions = statuses.includes("review");
 
-    const loadProtocols = async (options = {}) => {
+    const loadProtocols = useCallback(async (options = {}) => {
         const {silent = false} = options;
 
         try {
@@ -351,15 +359,25 @@ function ProtocolList({
 
             setError("");
 
-            const response = await api.get("/cars/protocols/");
-            const data = response.data;
-
             let items = [];
 
-            if (Array.isArray(data)) {
-                items = data;
-            } else if (Array.isArray(data?.results)) {
-                items = data.results;
+            let page = 1;
+            let hasNextPage = true;
+
+            while (hasNextPage) {
+                const response = await api.get("/cars/protocols/", {
+                    params: {page, page_size: 100},
+                });
+                const data = response.data;
+
+                if (Array.isArray(data)) {
+                    items = data;
+                    break;
+                }
+
+                items.push(...(data?.results || []));
+                hasNextPage = Boolean(data?.next);
+                page += 1;
             }
 
             const filteredByStatus = items.filter((item) =>
@@ -369,22 +387,22 @@ function ProtocolList({
             setProtocols(filteredByStatus);
         } catch (err) {
             console.error(err);
-            setError("Не удалось загрузить протоколы");
+            setError(getApiErrorMessage(err, "Не удалось загрузить протоколы"));
         } finally {
             if (!silent) {
                 setLoading(false);
             }
         }
-    };
+    }, [statuses]);
 
-    const loadCurrentUser = async () => {
+    const loadCurrentUser = useCallback(async () => {
         try {
             const response = await api.get("/cars/get-user/");
             setCurrentUser(response.data);
         } catch (error) {
             console.error("Ошибка загрузки текущего пользователя:", error);
         }
-    };
+    }, []);
 
     useEffect(() => {
         loadCurrentUser();
@@ -404,62 +422,125 @@ function ProtocolList({
             clearTimeout(refreshTimer);
             window.removeEventListener("focus", handleWindowFocus);
         };
-    }, []);
+    }, [loadCurrentUser, loadProtocols]);
 
     useEffect(() => {
-        const socket = new WebSocket(getWebSocketUrl());
+        let socket = null;
+        let reconnectTimer = null;
+        let reconnectDelay = 1000;
+        let stopped = false;
 
-        socket.onopen = () => {
-            console.log("Protocols WebSocket connected");
+        const scheduleReconnect = (delay = reconnectDelay) => {
+            if (stopped || reconnectTimer) {
+                return;
+            }
+
+            reconnectTimer = setTimeout(() => {
+                reconnectTimer = null;
+                connect();
+            }, delay);
+            reconnectDelay = Math.min(reconnectDelay * 2, 10000);
         };
 
-        socket.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
+        const connect = () => {
+            if (stopped || socket) {
+                return;
+            }
 
-                if (data.type !== "protocol_status_changed") {
+            const nextSocket = createProtocolWebSocket();
+            if (!nextSocket) {
+                return;
+            }
+
+            socket = nextSocket;
+
+            nextSocket.onopen = () => {
+                reconnectDelay = 1000;
+                console.log("Protocols WebSocket connected");
+            };
+
+            nextSocket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    if (data.type !== "protocol_status_changed") {
+                        return;
+                    }
+
+                    const updatedProtocol = data.protocol;
+
+                    setProtocols((prevProtocols) =>
+                        prevProtocols.map((protocol) =>
+                            protocol.id === updatedProtocol.id
+                                ? {
+                                    ...protocol,
+                                    status: updatedProtocol.status,
+                                    locked_by: updatedProtocol.locked_by,
+                                    locked_by_id: updatedProtocol.locked_by_id,
+                                    locked_by_username: updatedProtocol.locked_by_username,
+                                    locked_by_full_name: updatedProtocol.locked_by_full_name,
+                                    returned_for_revision: updatedProtocol.returned_for_revision,
+                                    revision_comment: updatedProtocol.revision_comment,
+                                    cancelled_at: updatedProtocol.cancelled_at,
+                                    cancelled_by: updatedProtocol.cancelled_by,
+                                    cancelled_by_id: updatedProtocol.cancelled_by_id,
+                                    cancelled_by_username: updatedProtocol.cancelled_by_username,
+                                    cancelled_by_full_name: updatedProtocol.cancelled_by_full_name,
+                                }
+                                : protocol
+                        )
+                    );
+                } catch (error) {
+                    console.error("Protocols WebSocket message error:", error);
+                }
+            };
+
+            nextSocket.onerror = (error) => {
+                console.error("Protocols WebSocket error:", error);
+            };
+
+            nextSocket.onclose = async (event) => {
+                if (socket !== nextSocket) {
                     return;
                 }
 
-                const updatedProtocol = data.protocol;
+                socket = null;
 
-                setProtocols((prevProtocols) =>
-                    prevProtocols.map((protocol) =>
-                        protocol.id === updatedProtocol.id
-                            ? {
-                                ...protocol,
-                                status: updatedProtocol.status,
-                                locked_by: updatedProtocol.locked_by,
-                                locked_by_id: updatedProtocol.locked_by_id,
-                                locked_by_username: updatedProtocol.locked_by_username,
-                                locked_by_full_name: updatedProtocol.locked_by_full_name,
+                if (stopped) {
+                    return;
+                }
 
-                                returned_for_revision: updatedProtocol.returned_for_revision,
-                                revision_comment: updatedProtocol.revision_comment,
-                                cancelled_at: updatedProtocol.cancelled_at,
-                                cancelled_by: updatedProtocol.cancelled_by,
-                                cancelled_by_id: updatedProtocol.cancelled_by_id,
-                                cancelled_by_username: updatedProtocol.cancelled_by_username,
-                                cancelled_by_full_name: updatedProtocol.cancelled_by_full_name,
-                            }
-                            : protocol
-                    )
-                );
-            } catch (error) {
-                console.error("Protocols WebSocket message error:", error);
+                if (event.code === 4401) {
+                    try {
+                        await api.refreshAccessToken();
+                        reconnectDelay = 1000;
+                    } catch {
+                        return;
+                    }
+                }
+
+                scheduleReconnect(event.code === 4401 ? 0 : reconnectDelay);
+            };
+        };
+
+        const handleTokenRefresh = () => {
+            if (socket) {
+                socket.close(4001, "access token refreshed");
+            } else {
+                connect();
             }
         };
 
-        socket.onerror = (error) => {
-            console.error("Protocols WebSocket error:", error);
-        };
-
-        socket.onclose = () => {
-            console.log("Protocols WebSocket disconnected");
-        };
+        window.addEventListener("auth:token-refreshed", handleTokenRefresh);
+        connect();
 
         return () => {
-            socket.close();
+            stopped = true;
+            window.removeEventListener("auth:token-refreshed", handleTokenRefresh);
+            clearTimeout(reconnectTimer);
+            reconnectTimer = null;
+            socket?.close(1000, "component unmounted");
+            socket = null;
         };
     }, []);
 
@@ -495,7 +576,11 @@ function ProtocolList({
     };
 
     const handleOpen = (protocol) => {
-        navigate(`/protocols/${protocol.id}/inspection`);
+        const path = protocol.status === "measurement"
+            ? "measurement"
+            : "inspection";
+
+        navigate(`/protocols/${protocol.id}/${path}`);
     };
 
     const canManageProtocols = Boolean(
@@ -506,7 +591,7 @@ function ProtocolList({
 
     const handleManagerReleaseLock = async (protocolId) => {
         const confirmed = window.confirm(
-            "Освободить протокол? Он снова станет доступен как черновик."
+            "Освободить протокол? Он останется на текущем этапе и станет доступен другим пользователям."
         );
 
         if (!confirmed) {
@@ -521,7 +606,6 @@ function ProtocolList({
                     protocol.id === protocolId
                         ? {
                             ...protocol,
-                            status: "draft",
                             locked_by: null,
                             locked_by_id: null,
                             locked_by_username: null,
@@ -534,9 +618,7 @@ function ProtocolList({
             console.error("Ошибка освобождения протокола:", error);
 
             alert(
-                error.response?.data?.detail ||
-                error.response?.data?.error ||
-                "Не удалось освободить протокол"
+                getApiErrorMessage(error, "Не удалось освободить протокол")
             );
         }
     };
@@ -560,9 +642,7 @@ function ProtocolList({
             console.error("Ошибка утверждения протокола:", error);
 
             alert(
-                error.response?.data?.detail ||
-                error.response?.data?.error ||
-                "Не удалось утвердить протокол"
+                getApiErrorMessage(error, "Не удалось утвердить протокол")
             );
         }
     };
@@ -586,9 +666,7 @@ function ProtocolList({
             console.error("Ошибка возврата протокола на доработку:", error);
 
             alert(
-                error.response?.data?.detail ||
-                error.response?.data?.error ||
-                "Не удалось вернуть протокол на доработку"
+                getApiErrorMessage(error, "Не удалось вернуть протокол на доработку")
             );
         }
     };

@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
@@ -35,6 +35,17 @@ const DOCX_PHOTO_SLOTS = [
     },
 ];
 
+const imageAccept = "image/*";
+
+const invisibleInputSx = {
+    position: "fixed",
+    left: "-9999px",
+    top: "-9999px",
+    width: "1px",
+    height: "1px",
+    opacity: 0,
+};
+
 function ProtocolInspectionPhotos({
     protocolId,
     photos = [],
@@ -46,6 +57,11 @@ function ProtocolInspectionPhotos({
     const [uploadingType, setUploadingType] = useState(null);
     const [deletingId, setDeletingId] = useState(null);
     const [error, setError] = useState("");
+
+    const mainFileInputRefs = useRef({});
+    const mainCameraInputRefs = useRef({});
+    const additionalFileInputRef = useRef(null);
+    const additionalCameraInputRef = useRef(null);
 
     const photosByType = useMemo(() => {
         const result = {};
@@ -73,10 +89,30 @@ function ProtocolInspectionPhotos({
         });
     };
 
+    const getUploadErrorText = (err, defaultMessage) => {
+        return (
+            err?.response?.data?.file ||
+            err?.response?.data?.photo_type ||
+            err?.response?.data?.error ||
+            err?.response?.data?.detail ||
+            defaultMessage
+        );
+    };
+
+    const openInput = (input) => {
+        if (!input) {
+            return;
+        }
+
+        input.value = "";
+        input.click();
+    };
+
     const handleMainPhotoUpload = async (event, slot) => {
         const file = event.target.files?.[0];
 
         if (!file) {
+            event.target.value = "";
             return;
         }
 
@@ -98,12 +134,7 @@ function ProtocolInspectionPhotos({
 
             setPhotos(nextPhotos);
         } catch (err) {
-            setError(
-                err?.response?.data?.file ||
-                err?.response?.data?.photo_type ||
-                err?.response?.data?.error ||
-                "Не удалось загрузить фото"
-            );
+            setError(getUploadErrorText(err, "Не удалось загрузить фото"));
         } finally {
             setUploadingType(null);
             event.target.value = "";
@@ -114,6 +145,7 @@ function ProtocolInspectionPhotos({
         const files = Array.from(event.target.files || []);
 
         if (!files.length) {
+            event.target.value = "";
             return;
         }
 
@@ -136,11 +168,7 @@ function ProtocolInspectionPhotos({
 
             setPhotos(sortPhotos([...photos, ...uploadedPhotos]));
         } catch (err) {
-            setError(
-                err?.response?.data?.file ||
-                err?.response?.data?.error ||
-                "Не удалось загрузить дополнительные фото"
-            );
+            setError(getUploadErrorText(err, "Не удалось загрузить дополнительные фото"));
         } finally {
             setUploadingType(null);
             event.target.value = "";
@@ -158,6 +186,7 @@ function ProtocolInspectionPhotos({
         } catch (err) {
             setError(
                 err?.response?.data?.error ||
+                err?.response?.data?.detail ||
                 "Не удалось удалить фото"
             );
         } finally {
@@ -172,7 +201,7 @@ function ProtocolInspectionPhotos({
             </Typography>
 
             {error && (
-                <Alert severity="error" sx={{ mb: 3 }}>
+                <Alert severity="error" sx={{ mb: 3, borderRadius: 0 }}>
                     {error}
                 </Alert>
             )}
@@ -235,19 +264,49 @@ function ProtocolInspectionPhotos({
                                     )}
                                 </CardContent>
 
-                                <CardActions>
+                                <CardActions
+                                    sx={{
+                                        display: "flex",
+                                        flexWrap: "wrap",
+                                        gap: 1,
+                                    }}
+                                >
+                                    <input
+                                        ref={(element) => {
+                                            mainFileInputRefs.current[slot.type] = element;
+                                        }}
+                                        style={invisibleInputSx}
+                                        type="file"
+                                        accept={imageAccept}
+                                        onChange={(event) =>
+                                            handleMainPhotoUpload(event, slot)
+                                        }
+                                    />
+
+                                    <input
+                                        ref={(element) => {
+                                            mainCameraInputRefs.current[slot.type] = element;
+                                        }}
+                                        style={invisibleInputSx}
+                                        type="file"
+                                        accept={imageAccept}
+                                        capture="environment"
+                                        onChange={(event) =>
+                                            handleMainPhotoUpload(event, slot)
+                                        }
+                                    />
+
                                     <Button
-                                        component="label"
                                         variant="contained"
                                         size="small"
                                         disabled={isUploading}
+                                        onClick={() =>
+                                            openInput(mainFileInputRefs.current[slot.type])
+                                        }
                                     >
                                         {isUploading ? (
                                             <>
-                                                <CircularProgress
-                                                    size={16}
-                                                    sx={{ mr: 1 }}
-                                                />
+                                                <CircularProgress size={16} sx={{ mr: 1 }} />
                                                 Загрузка
                                             </>
                                         ) : photo ? (
@@ -255,15 +314,17 @@ function ProtocolInspectionPhotos({
                                         ) : (
                                             "Загрузить"
                                         )}
+                                    </Button>
 
-                                        <input
-                                            hidden
-                                            type="file"
-                                            accept="image/jpeg,image/png,image/webp"
-                                            onChange={(event) =>
-                                                handleMainPhotoUpload(event, slot)
-                                            }
-                                        />
+                                    <Button
+                                        variant="outlined"
+                                        size="small"
+                                        disabled={isUploading}
+                                        onClick={() =>
+                                            openInput(mainCameraInputRefs.current[slot.type])
+                                        }
+                                    >
+                                        Сделать фото
                                     </Button>
 
                                     {photo && (
@@ -288,11 +349,36 @@ function ProtocolInspectionPhotos({
                 Дополнительные фото
             </Typography>
 
-            <Box sx={{ mb: 2 }}>
+            <Box
+                sx={{
+                    mb: 2,
+                    display: "flex",
+                    flexWrap: "wrap",
+                    gap: 1,
+                }}
+            >
+                <input
+                    ref={additionalFileInputRef}
+                    style={invisibleInputSx}
+                    multiple
+                    type="file"
+                    accept={imageAccept}
+                    onChange={handleAdditionalPhotosUpload}
+                />
+
+                <input
+                    ref={additionalCameraInputRef}
+                    style={invisibleInputSx}
+                    type="file"
+                    accept={imageAccept}
+                    capture="environment"
+                    onChange={handleAdditionalPhotosUpload}
+                />
+
                 <Button
-                    component="label"
                     variant="contained"
                     disabled={uploadingType === "other"}
+                    onClick={() => openInput(additionalFileInputRef.current)}
                 >
                     {uploadingType === "other" ? (
                         <>
@@ -302,19 +388,19 @@ function ProtocolInspectionPhotos({
                     ) : (
                         "Добавить дополнительные фото"
                     )}
+                </Button>
 
-                    <input
-                        hidden
-                        multiple
-                        type="file"
-                        accept="image/jpeg,image/png,image/webp"
-                        onChange={handleAdditionalPhotosUpload}
-                    />
+                <Button
+                    variant="outlined"
+                    disabled={uploadingType === "other"}
+                    onClick={() => openInput(additionalCameraInputRef.current)}
+                >
+                    Сделать дополнительное фото
                 </Button>
             </Box>
 
             {additionalPhotos.length === 0 ? (
-                <Alert severity="info">
+                <Alert severity="info" sx={{ borderRadius: 0 }}>
                     Дополнительные фото не загружены.
                 </Alert>
             ) : (

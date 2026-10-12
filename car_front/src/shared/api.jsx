@@ -27,12 +27,22 @@ class ApiClient {
             },
         });
 
+        this.csrfClient = axios.create({
+            baseURL: baseUrl,
+            withCredentials: true,
+            headers: {
+                "Content-Type": "application/json",
+                "X-Requested-With": "XMLHttpRequest",
+            },
+        });
+
         const token = localStorage.getItem("accessToken");
         if (token) {
             this.client.defaults.headers.common["Authorization"] = `Bearer ${token}`;
         }
 
         this.isRefreshing = false;
+        this.refreshPromise = null;
         this.failedRequests = [];
 
         this.client.interceptors.response.use(
@@ -69,26 +79,13 @@ class ApiClient {
                     const refreshToken = localStorage.getItem("refreshToken");
 
                     if (!refreshToken) {
+                        this.isRefreshing = false;
                         this.logout();
                         return Promise.reject(error);
                     }
 
-                    return axios
-                        .post(`${baseURL}/cars/token/refresh/`, {
-                            refresh: refreshToken,
-                        })
-                        .then((response) => {
-                            const newAccessToken = response.data.access;
-                            const newRefreshToken = response.data.refresh;
-
-                            localStorage.setItem("accessToken", newAccessToken);
-
-                            if (newRefreshToken) {
-                                localStorage.setItem("refreshToken", newRefreshToken);
-                            }
-
-                            this.client.defaults.headers.common["Authorization"] = `Bearer ${newAccessToken}`;
-
+                    return this.refreshAccessToken()
+                        .then((newAccessToken) => {
                             originalRequest.headers = originalRequest.headers || {};
                             originalRequest.headers["Authorization"] = `Bearer ${newAccessToken}`;
 
@@ -120,15 +117,66 @@ class ApiClient {
         this.setCsrfToken();
     }
 
-    logout() {
+    async refreshAccessToken() {
+        if (this.refreshPromise) {
+            return this.refreshPromise;
+        }
+
+        const refreshToken = localStorage.getItem("refreshToken");
+
+        if (!refreshToken) {
+            this.logout();
+            throw new Error("Refresh token is missing");
+        }
+
+        this.refreshPromise = axios
+            .post(`${baseURL}/cars/token/refresh/`, {refresh: refreshToken})
+            .then((response) => {
+                const newAccessToken = response.data.access;
+                const newRefreshToken = response.data.refresh;
+
+                localStorage.setItem("accessToken", newAccessToken);
+
+                if (newRefreshToken) {
+                    localStorage.setItem("refreshToken", newRefreshToken);
+                }
+
+                this.client.defaults.headers.common["Authorization"] = `Bearer ${newAccessToken}`;
+                window.dispatchEvent(new CustomEvent("auth:token-refreshed"));
+
+                return newAccessToken;
+            })
+            .finally(() => {
+                this.refreshPromise = null;
+            });
+
+        return this.refreshPromise;
+    }
+
+    async logout() {
+        const refreshToken = localStorage.getItem("refreshToken");
+
+        if (refreshToken) {
+            try {
+                await axios.post(`${baseURL}/cars/logout/`, {refresh: refreshToken});
+            } catch (error) {
+                console.warn("Не удалось отозвать refresh-токен:", error);
+            }
+        }
+
         localStorage.removeItem("accessToken");
         localStorage.removeItem("refreshToken");
         delete this.client.defaults.headers.common["Authorization"];
+        delete this.client.defaults.headers.common["X-CSRFToken"];
+
+        if (window.location.pathname !== "/") {
+            window.location.assign("/");
+        }
     }
 
     async setCsrfToken() {
         try {
-            const response = await this.client.get("/cars/get_csrf_token/");
+            const response = await this.csrfClient.get("/cars/get_csrf_token/");
             if (response.data.csrf_token) {
                 this.client.defaults.headers.common["X-CSRFToken"] = response.data.csrf_token;
             }
@@ -182,9 +230,19 @@ class ApiClient {
         return this.client.delete(url, config);
     }
 
-    generateProtocolDocx(protocolId) {
+    generateProtocolDocx(protocolId, templateVariant = "old") {
         return this.client.post(
             `/cars/protocols/${protocolId}/generate-docx/`,
+            { template: templateVariant },
+            {
+                responseType: "blob",
+            }
+        );
+    }
+
+    previewProtocolPdf(protocolId) {
+        return this.client.post(
+            `/cars/protocols/${protocolId}/preview-pdf/`,
             {},
             {
                 responseType: "blob",

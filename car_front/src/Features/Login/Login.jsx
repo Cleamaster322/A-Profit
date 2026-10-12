@@ -1,7 +1,8 @@
-import {useEffect, useState} from "react";
+import {useCallback, useEffect, useState} from "react";
 import {useNavigate} from "react-router-dom";
 
 import api from "../../shared/api.jsx";
+import {getApiErrorMessage} from "../../shared/errorHandler.jsx";
 
 import Box from "@mui/material/Box";
 import TextField from "@mui/material/TextField";
@@ -20,15 +21,22 @@ function Login() {
 
     const navigate = useNavigate();
 
+    const navigateByRole = useCallback(async () => {
+        const response = await api.get("/cars/get-user/");
+        if (!response.data.role) {
+            throw new Error("Пользователь не имеет роли");
+        }
+
+        navigate(response.data.role === "measurer" ? "/measurement" : "/protocols");
+    }, [navigate]);
+
     useEffect(() => {
         const accessToken = localStorage.getItem("accessToken");
         const refreshToken = localStorage.getItem("refreshToken");
 
         if (accessToken && refreshToken) {
             api.get("/cars/brands/")
-                .then(() => {
-                    navigate("/protocols");
-                })
+                .then(() => navigateByRole())
                 .catch(() => {
                     localStorage.removeItem("accessToken");
                     localStorage.removeItem("refreshToken");
@@ -39,7 +47,7 @@ function Login() {
         } else {
             setCheckingAuth(false);
         }
-    }, [navigate]);
+    }, [navigateByRole]);
 
     async function submitData() {
         setLoading(true);
@@ -57,16 +65,16 @@ function Login() {
 
                 await api.setTokenAuth();
 
-                navigate("/protocols");
+                await navigateByRole();
             } else {
                 setError("Ошибка авторизации");
             }
         } catch (e) {
-            if (e.response?.status === 401) {
-                setError("Неверный логин или пароль");
-            } else {
-                setError("Ошибка сети или сервер недоступен");
-            }
+            setError(
+                e.response?.status === 401
+                    ? "Неверный логин или пароль"
+                    : getApiErrorMessage(e, "Ошибка авторизации")
+            );
         } finally {
             setLoading(false);
         }

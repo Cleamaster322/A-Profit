@@ -10,10 +10,6 @@ function CarInfo() {
     const location = useLocation();
     const {selectedBrand, selectedModel, selectedGeneration, selectedConfiguration} = location.state || {};
 
-    if (!selectedBrand) {
-        return <p>Нет данных о выбранной машине. Пожалуйста, выберите машину на предыдущей странице.</p>;
-    }
-
     // Локальные стейты для редактируемых полей
     const [brandName, setBrandName] = useState("");
     const [modelName, setModelName] = useState("");
@@ -74,6 +70,10 @@ function CarInfo() {
             }
         }
     }, [selectedBrand, selectedModel, selectedGeneration, selectedConfiguration]);
+
+    if (!selectedBrand) {
+        return <p>Нет данных о выбранной машине. Пожалуйста, выберите машину на предыдущей странице.</p>;
+    }
 
     const handleCreate = async () => {
         const dataToCreate = {

@@ -1,11 +1,14 @@
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 
 function ProtocolInspectionMisc({
                                     form,
                                     handleChange,
+    measurementMode = false,
                                     textFieldSx,
                                     selectFieldSx,
                                     sectionPaperSx,
@@ -59,6 +62,22 @@ function ProtocolInspectionMisc({
                         {value: "false", label: "Отсутствует"},
                     ],
                 })}
+                <Grid size={{xs: 12, md: 4}}>
+                    <FormControlLabel
+                        control={(
+                            <Checkbox
+                                checked={form.pneumatic_suspension_present === "true"}
+                                onChange={(event) => handleChange({
+                                    target: {
+                                        name: "pneumatic_suspension_present",
+                                        value: event.target.checked ? "true" : "false",
+                                    },
+                                })}
+                            />
+                        )}
+                        label="Пневматическая подвеска"
+                    />
+                </Grid>
             </Grid>
 
             <Typography variant="h6" sx={subsectionTitleSx}>
@@ -338,11 +357,11 @@ function ProtocolInspectionMisc({
                 })}
             </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
+            {!measurementMode && <Typography variant="h6" sx={subsectionTitleSx}>
                 Габаритные размеры ТС
-            </Typography>
+            </Typography>}
 
-            <Grid container spacing={2} sx={{mb: 3}}>
+            {!measurementMode && <Grid container spacing={2} sx={{mb: 3}}>
                 {renderField({
                     form,
                     handleChange,
@@ -369,13 +388,13 @@ function ProtocolInspectionMisc({
                     name: "vehicle_height_mm",
                     md: 4,
                 })}
-            </Grid>
+            </Grid>}
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
+            {!measurementMode && <Typography variant="h6" sx={subsectionTitleSx}>
                 Масса и нагрузка на ось
-            </Typography>
+            </Typography>}
 
-            <Grid container spacing={2}>
+            {!measurementMode && <Grid container spacing={2}>
                 {renderField({
                     form,
                     handleChange,
@@ -400,7 +419,7 @@ function ProtocolInspectionMisc({
                     name: "axle2_load_kg",
                     md: 4,
                 })}
-            </Grid>
+            </Grid>}
         </Paper>
     );
 }
