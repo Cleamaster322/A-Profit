@@ -67,8 +67,8 @@ const NUMERIC_RANGE_RULES = {
     additional_brake_signal_optical_center_shift_mm: {min: 0, max: 150, label: "Смещение центра дополнительного сигнала торможения", unit: "мм"},
     rear_fog_upper_point_mm: {min: 250, max: 1000, label: "Задние противотуманные фонари, верхняя точка", unit: "мм"},
     rear_fog_lower_point_mm: {min: 250, max: 1000, label: "Задние противотуманные фонари, нижняя точка", unit: "мм"},
-    turn_signal_frequency_hz: {min: 1.4, max: 1.6, allowedValues: [1.4, 1.6], label: "Частота указателей поворота", unit: "Гц"},
-    turn_signal_frequency_per_min: {min: 84, max: 96, allowedValues: [84, 96], label: "Частота указателей поворота", unit: "проблесков/мин"},
+    turn_signal_frequency_hz: {min: 1.4, max: 1.6, allowedValues: [1.4, 1.5, 1.6], label: "Частота указателей поворота", unit: "Гц"},
+    turn_signal_frequency_per_min: {min: 84, max: 96, allowedValues: [84, 90, 96], label: "Частота указателей поворота", unit: "проблесков/мин"},
 };
 
 const TIRE_DEPTH_FIELDS = new Set([
@@ -90,13 +90,11 @@ function getNumericRule(fieldName, form) {
     }
 
     if (fieldName === "axle_1_brake_difference_pct") {
-        const max = form.service_brake_type === "disc_disc" || form.service_brake_type === "disc_drum" ? 20 : 25;
-        return {min: 0, max, label: "Относительная разность тормозных сил колес оси 1", unit: "%"};
+        return {min: 0, max: 14, label: "Относительная разность тормозных сил колес оси 1", unit: "%"};
     }
 
     if (fieldName === "axle_2_brake_difference_pct") {
-        const max = form.service_brake_type === "disc_disc" ? 20 : 25;
-        return {min: 0, max, label: "Относительная разность тормозных сил колес оси 2", unit: "%"};
+        return {min: 0, max: 14, label: "Относительная разность тормозных сил колес оси 2", unit: "%"};
     }
 
     if (fieldName === "parking_brake_control_force_n") {

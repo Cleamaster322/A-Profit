@@ -240,9 +240,9 @@ For A.8.13.2, `applicable_8_13_2` is a legacy full-result value in the present-l
 ```text
 {{ protocol_number }} -> {{ protocol_number }}
 {{ protocol_date }} -> {{ protocol_date }}
-{{ owner_first_name }} -> {{ owner_first_name }}
-{{ owner_last_name }} -> {{ owner_last_name }}
-{{ owner_middle_name }} -> {{ owner_middle_name }}
+{{ owner_full_name }} -> {{ owner_full_name }}
+{{ owner_address }} -> {{ owner_address }}
+{{ submitted_documents }} -> {{ submitted_documents }}
 {{ manufacturer_info }} -> {{ vehicle_manufacturer_info }}
 {{ brand_name }} -> {{ vehicle_brand_name }}
 {{ commercial_name }} -> {{ vehicle_model_name }}

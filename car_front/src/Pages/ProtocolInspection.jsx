@@ -17,6 +17,7 @@ import MenuItem from "@mui/material/MenuItem";
 import TextField from "@mui/material/TextField";
 
 import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolInspectionHeader.jsx";
+import {calculateBrakeMetrics, validateBrakeMetrics} from "../Features/ProtocolInspection/brakeCalculations.js";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
 import ProtocolInspectionPhotos from "../Features/ProtocolInspection/ProtocolInspectionPhotos.jsx";
 import ProtocolInspectionVehicle from "../Features/ProtocolInspection/ProtocolInspectionVehicle.jsx";
@@ -106,10 +107,10 @@ const initialForm = {
     generation_id: "",
     configuration_id: "",
     revision_comment: "",
-    owner_last_name: "",
-    owner_first_name: "",
-    owner_middle_name: "",
+    owner_full_name: "",
+    owner_address: "",
     manufacturer_info: "",
+    header_document_selections: [],
 
     ambient_temp_c: "",
     ambient_humidity_pct: "",
@@ -271,6 +272,26 @@ const initialForm = {
 
 function isDashValue(value) {
     return typeof value === "string" && value.trim() === "-";
+}
+
+function toOwnerFullNameFormValue(protocol, dashFields = []) {
+    const ownerName = toFormValue(protocol.owner_name, dashFields, "owner_name");
+
+    if (ownerName) {
+        return ownerName;
+    }
+
+    const dashNameFields = ["owner_last_name", "owner_first_name", "owner_middle_name"];
+    const hasDashName = dashNameFields.some((fieldName) => dashFields.includes(fieldName));
+
+    if (hasDashName && !protocol.owner_last_name && !protocol.owner_first_name && !protocol.owner_middle_name) {
+        return "-";
+    }
+
+    return [protocol.owner_last_name, protocol.owner_first_name, protocol.owner_middle_name]
+        .map((part) => (part == null ? "" : String(part).trim()))
+        .filter(Boolean)
+        .join(" ");
 }
 
 function toFormValue(value, dashFields = [], apiFieldName = null) {
@@ -456,9 +477,8 @@ function BlockError({message}) {
 const PROTOCOL_DASH_FIELDS = [
     {formField: "protocol_number", apiField: "protocol_number"},
     {formField: "appendix_number", apiField: "appendix_number"},
-    {formField: "owner_last_name", apiField: "owner_last_name"},
-    {formField: "owner_first_name", apiField: "owner_first_name"},
-    {formField: "owner_middle_name", apiField: "owner_middle_name"},
+    {formField: "owner_full_name", apiField: "owner_name"},
+    {formField: "owner_address", apiField: "owner_address"},
     {formField: "manufacturer_info", apiField: "manufacturer_info"},
     {formField: "brand_name", apiField: "brand_name"},
     {formField: "commercial_name", apiField: "commercial_name"},
@@ -878,10 +898,12 @@ function mapProtocolToForm(data) {
         revision_comment: protocol.revision_comment || "",
         supercharger: toFormValue(protocol.supercharger, protocolDashFields, "supercharger"),
 
-        owner_last_name: toFormValue(protocol.owner_last_name, protocolDashFields, "owner_last_name"),
-        owner_first_name: toFormValue(protocol.owner_first_name, protocolDashFields, "owner_first_name"),
-        owner_middle_name: toFormValue(protocol.owner_middle_name, protocolDashFields, "owner_middle_name"),
+        owner_full_name: toOwnerFullNameFormValue(protocol, protocolDashFields),
+        owner_address: toFormValue(protocol.owner_address, protocolDashFields, "owner_address"),
         manufacturer_info: toFormValue(protocol.manufacturer_info, protocolDashFields, "manufacturer_info"),
+        header_document_selections: Array.isArray(protocol.header_document_selections)
+            ? protocol.header_document_selections
+            : [],
 
         ambient_temp_c: toFormValue(testConditions.ambient_temperature_c, testConditionsDashFields, "ambient_temperature_c"),
         ambient_humidity_pct: toFormValue(testConditions.relative_humidity_pct, testConditionsDashFields, "relative_humidity_pct"),
@@ -1047,10 +1069,13 @@ function buildProtocolPayload(form) {
         protocol_number: formatProtocolNumber(form.protocol_number),
         appendix_number: emptyToNull(form.appendix_number),
         protocol_date: emptyToNull(form.protocol_date),
-        owner_last_name: emptyToNull(form.owner_last_name),
-        owner_first_name: emptyToNull(form.owner_first_name),
-        owner_middle_name: emptyToNull(form.owner_middle_name),
+        owner_name: emptyToNull(form.owner_full_name) || "",
+        owner_last_name: null,
+        owner_first_name: null,
+        owner_middle_name: null,
+        owner_address: emptyToNull(form.owner_address) || "",
         manufacturer_info: emptyToNull(form.manufacturer_info),
+        header_document_selections: form.header_document_selections || [],
 
         brand_name: emptyToNull(form.brand_name),
         commercial_name: emptyToNull(form.commercial_name),
@@ -1106,7 +1131,7 @@ function buildPowerSupplyPayload(form) {
     return normalizeNumericPayload(payload, POWER_SUPPLY_NUMERIC_FIELDS);
 }
 
-function buildMeasurementPayload(form) {
+function buildMeasurementPayload(form, dromMassKg = form.vehicle_weight_kg) {
     const payload = {
         mileage_km: emptyToNull(form.mileage_km),
 
@@ -1163,7 +1188,7 @@ function buildMeasurementPayload(form) {
         vehicle_length_mm: emptyToNull(form.vehicle_length_mm),
         vehicle_width_mm: emptyToNull(form.vehicle_width_mm),
         vehicle_height_mm: emptyToNull(form.vehicle_height_mm),
-        vehicle_weight_kg: emptyToNull(form.vehicle_weight_kg),
+        vehicle_weight_kg: emptyToNull(dromMassKg),
 
         axle1_load_kg: emptyToNull(form.axle1_load_kg),
         axle2_load_kg: emptyToNull(form.axle2_load_kg),
@@ -1181,6 +1206,7 @@ function buildMeasurementPayload(form) {
 }
 
 function buildBrakePayload(form) {
+    const brakeMetrics = calculateBrakeMetrics(form);
     const payload = {
         service_brake_type: emptyToNull(form.service_brake_type),
         parking_brake_type: emptyToNull(form.parking_brake_type),
@@ -1189,8 +1215,8 @@ function buildBrakePayload(form) {
         service_brake_control_force_axle2_n: emptyToNull(form.service_brake_control_force_axle2_n),
         parking_brake_control_force_n: emptyToNull(form.parking_brake_control_force_n),
 
-        axle_1_brake_difference_pct: emptyToNull(form.axle_1_brake_difference_pct),
-        axle_2_brake_difference_pct: emptyToNull(form.axle_2_brake_difference_pct),
+        axle_1_brake_difference_pct: brakeMetrics.axle1DifferencePct === null ? null : brakeMetrics.axle1DifferencePct.toFixed(2),
+        axle_2_brake_difference_pct: brakeMetrics.axle2DifferencePct === null ? null : brakeMetrics.axle2DifferencePct.toFixed(2),
 
         service_brake_front_left_kn: emptyToNull(form.service_brake_front_left_kn),
         service_brake_front_right_kn: emptyToNull(form.service_brake_front_right_kn),
@@ -1315,6 +1341,14 @@ function ProtocolInspection({measurementMode = false}) {
         Boolean(location.state?.openDataReview)
     );
     const [dataReviewChoices, setDataReviewChoices] = useState({});
+    const openDataReviewRequested = Boolean(location.state?.openDataReview);
+    const catalogMatchesConfiguration = catalogConfiguration
+        && String(catalogConfiguration.id) === String(form.configuration_id);
+    const dromMassKg = !form.configuration_id
+        ? null
+        : catalogMatchesConfiguration
+            ? catalogConfiguration.vehicle_weight_kg
+            : form.vehicle_weight_kg;
 
     const headerRef = useRef(null);
     const conditionsRef = useRef(null);
@@ -1421,6 +1455,9 @@ function ProtocolInspection({measurementMode = false}) {
         setForm((prev) => ({
             ...prev,
             [name]: value,
+            ...(name === "turn_signal_frequency_hz"
+                ? {turn_signal_frequency_per_min: value ? String(Number(value) * 60) : ""}
+                : {}),
         }));
     };
 
@@ -1552,24 +1589,36 @@ function ProtocolInspection({measurementMode = false}) {
     }, [id, loadProtocol]);
 
     useEffect(() => {
-        if (!location.state?.openDataReview || !form.configuration_id) {
+        if (!form.configuration_id) {
+            setCatalogConfiguration(null);
             return;
         }
 
+        let isCurrent = true;
         api.get(`/cars/configurations/${form.configuration_id}/`)
             .then((response) => {
+                if (!isCurrent) return;
                 setCatalogConfiguration(response.data);
-                setDataReviewOpen(true);
-                navigate(location.pathname, {
-                    replace: true,
-                    state: {...location.state, openDataReview: false},
-                });
+                if (openDataReviewRequested) {
+                    setDataReviewOpen(true);
+                    navigate(location.pathname, {
+                        replace: true,
+                        state: {...location.state, openDataReview: false},
+                    });
+                }
             })
             .catch((error) => {
+                if (!isCurrent) return;
                 console.error("Ошибка загрузки данных Drom:", error);
-                setErrorMessage("Не удалось загрузить данные Drom для проверки");
+                if (openDataReviewRequested) {
+                    setErrorMessage("Не удалось загрузить данные Drom для проверки");
+                }
             });
-    }, [form.configuration_id, location.pathname, location.state, navigate]);
+
+        return () => {
+            isCurrent = false;
+        };
+    }, [form.configuration_id, location.pathname, location.state, navigate, openDataReviewRequested]);
 
     useEffect(() => {
         formStatusRef.current = form.status;
@@ -1664,12 +1713,14 @@ function ProtocolInspection({measurementMode = false}) {
             }
 
             const numericErrors = validateProtocolNumericRanges(activeForm);
-            if (numericErrors.length) {
+            const brakeMetricErrors = validateBrakeMetrics(activeForm, dromMassKg);
+            const validationErrors = [...numericErrors, ...brakeMetricErrors];
+            if (validationErrors.length) {
                 setErrorMessage(
-                    ["Исправьте числовые значения:", ...numericErrors.map(({message}) => message)].join("\n"),
+                    ["Исправьте значения:", ...validationErrors.map(({message}) => message)].join("\n"),
                 );
                 window.requestAnimationFrame(() => {
-                    const invalidField = document.getElementById(numericErrors[0].fieldName);
+                    const invalidField = document.getElementById(validationErrors[0].fieldName);
                     invalidField?.scrollIntoView({behavior: "smooth", block: "center"});
                     invalidField?.focus({preventScroll: true});
                 });
@@ -1713,7 +1764,7 @@ function ProtocolInspection({measurementMode = false}) {
                     request: () =>
                         api.patch(
                             `/cars/protocols/${protocolId}/measurement/update/`,
-                            buildMeasurementPayload(activeForm)
+                            buildMeasurementPayload(activeForm, dromMassKg)
                         ),
                 },
                 {
@@ -1862,7 +1913,7 @@ function ProtocolInspection({measurementMode = false}) {
         }
     };
 
-    const handleGenerateDocx = async (templateVariant) => {
+    const handleGenerateDocx = async () => {
         if (!currentProtocolId) {
             setErrorMessage("Сначала сохраните протокол");
             return;
@@ -1880,10 +1931,7 @@ function ProtocolInspection({measurementMode = false}) {
             setErrorMessage("");
             setSuccessMessage("Данные сохранены, формируется DOCX...");
 
-            const response = await api.generateProtocolDocx(
-                currentProtocolId,
-                templateVariant,
-            );
+            const response = await api.generateProtocolDocx(currentProtocolId);
 
             const blob = new Blob([response.data], {
                 type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1892,15 +1940,13 @@ function ProtocolInspection({measurementMode = false}) {
             const url = window.URL.createObjectURL(blob);
             const link = document.createElement("a");
             link.href = url;
-            link.download = `protocol_${currentProtocolId}_${templateVariant}.docx`;
+            link.download = `protocol_${currentProtocolId}.docx`;
             document.body.appendChild(link);
             link.click();
             link.remove();
             window.URL.revokeObjectURL(url);
 
-            setSuccessMessage(
-                `DOCX по ${templateVariant === "old" ? "старому" : "новому"} шаблону сформирован`,
-            );
+            setSuccessMessage("DOCX сформирован");
         } catch (error) {
             console.error("Ошибка генерации DOCX:", error);
             setErrorMessage("Не удалось сформировать DOCX");
@@ -1955,6 +2001,7 @@ function ProtocolInspection({measurementMode = false}) {
         form,
         handleChange,
         measurementMode,
+        dromMassKg,
         textFieldSx,
         selectFieldSx,
         sectionPaperSx,
@@ -2077,13 +2124,6 @@ function ProtocolInspection({measurementMode = false}) {
             measured: form.vehicle_height_mm,
             formField: "vehicle_height_mm",
         },
-        {
-            key: "vehicle_weight_kg",
-            label: "Масса по данным Drom, кг",
-            catalog: catalogConfiguration?.vehicle_weight_kg,
-            measured: form.vehicle_weight_kg,
-            formField: "vehicle_weight_kg",
-        },
     ];
 
     const handleDataReviewSave = async () => {
@@ -2126,7 +2166,7 @@ function ProtocolInspection({measurementMode = false}) {
                 );
             }
 
-            const measurementPayload = buildMeasurementPayload(nextForm);
+            const measurementPayload = buildMeasurementPayload(nextForm, dromMassKg);
             const measurementFieldMap = {
                 fuel_type: "fuel_type",
                 drive_type: "wheel_formula",
@@ -2140,14 +2180,12 @@ function ProtocolInspection({measurementMode = false}) {
                 vehicle_length_mm: "vehicle_length_mm",
                 vehicle_width_mm: "vehicle_width_mm",
                 vehicle_height_mm: "vehicle_height_mm",
-                vehicle_weight_kg: "vehicle_weight_kg",
             };
             const measurementUpdate = Object.fromEntries(
                 Object.entries(measurementFieldMap)
                     .filter(([reviewKey]) => reviewKey in selectedValues)
                     .map(([, apiField]) => [apiField, measurementPayload[apiField]])
             );
-
             if (Object.keys(measurementUpdate).length) {
                 measurementUpdate.dash_fields = measurementPayload.dash_fields;
                 await api.patch(
@@ -2203,27 +2241,7 @@ function ProtocolInspection({measurementMode = false}) {
             {!measurementMode && <>
                 <Button
                     variant="outlined"
-                    onClick={() => handleGenerateDocx("old")}
-                    disabled={!currentProtocolId || saving || loading}
-                    sx={{
-                        borderColor: "black",
-                        color: "black",
-                        borderRadius: 0,
-                        textTransform: "none",
-                        px: 3,
-                        py: 1,
-                        fontWeight: 800,
-                        "&:hover": {
-                            borderColor: "black",
-                            bgcolor: "#eeeeee",
-                        },
-                    }}
-                >
-                    {saving ? "Сохранение..." : "DOCX: старый шаблон"}
-                </Button>
-                <Button
-                    variant="outlined"
-                    onClick={() => handleGenerateDocx("v6")}
+                    onClick={handleGenerateDocx}
                     disabled={!currentProtocolId || saving || loading}
                     sx={{
                         borderColor: "#5f6b2f",
@@ -2239,7 +2257,7 @@ function ProtocolInspection({measurementMode = false}) {
                         },
                     }}
                 >
-                    {saving ? "Сохранение..." : "DOCX: новый шаблон v6"}
+                    {saving ? "Сохранение..." : "Скачать DOCX"}
                 </Button>
             </>}
 

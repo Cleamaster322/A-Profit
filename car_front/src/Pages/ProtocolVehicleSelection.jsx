@@ -365,8 +365,8 @@ function ProtocolVehicleSelection() {
     };
 
     const handleConfirm = async () => {
-        if (!manufactureMonth || !selectedGeneration || !selectedConfiguration) {
-            setError("Укажите месяц выпуска, поколение и конфигурацию");
+        if (!selectedGeneration || !selectedConfiguration) {
+            setError("Укажите поколение и конфигурацию");
             return;
         }
 
@@ -376,7 +376,7 @@ function ProtocolVehicleSelection() {
             await api.post(`/cars/protocols/${id}/select-configuration/`, {
                 generation_id: selectedGeneration.id,
                 configuration_id: selectedConfiguration.id,
-                manufacture_date: manufactureMonth,
+                manufacture_date: manufactureMonth || null,
             });
             navigate(`/protocols/${id}/inspection`, {
                 state: {openDataReview: true},
@@ -473,12 +473,12 @@ function ProtocolVehicleSelection() {
                                 Дата выпуска автомобиля
                             </Typography>
                             <Typography variant="body2" sx={{color: "text.secondary", mt: 0.5}}>
-                                Месяц из документов. По нему отфильтруются поколения и конфигурации.
+                                Необязательно. Если указать месяц из документов, список поколений и конфигураций отфильтруется по нему.
                             </Typography>
                         </Box>
                         <LocalizationProvider dateAdapter={AdapterDayjs} adapterLocale="ru">
                             <DatePicker
-                                label="Месяц и год"
+                                label="Месяц и год (необязательно)"
                                 views={["year", "month"]}
                                 openTo="month"
                                 format="MMMM YYYY"

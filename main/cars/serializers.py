@@ -417,6 +417,16 @@ class CarDataProtocolSerializer(serializers.ModelSerializer):
 # Протокол
 # =========================
 
+def normalize_owner_name(value):
+    if value is None:
+        return ""
+
+    if isinstance(value, str):
+        return value.strip()
+
+    return value
+
+
 class ProtocolSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
     locked_by_username = serializers.CharField(
         source='locked_by.username',
@@ -448,6 +458,9 @@ class ProtocolSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer)
             )
 
         return value
+
+    def validate_owner_name(self, value):
+        return normalize_owner_name(value)
 
     def get_locked_by_full_name(self, obj):
         if not obj.locked_by:
@@ -498,6 +511,34 @@ class ProtocolMeasurementSerializer(
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
+        protocol = attrs.get("protocol")
+        if protocol is None and self.instance is not None:
+            protocol = self.instance.protocol
+
+        drom_mass = attrs.get(
+            "vehicle_weight_kg",
+            getattr(self.instance, "vehicle_weight_kg", None),
+        )
+        if protocol is not None and protocol.configuration_id:
+            car_data = getattr(protocol, "car", None)
+            if car_data is None:
+                car_data = CarData.objects.filter(
+                    configuration_id=protocol.configuration_id
+                ).first()
+            drom_mass = car_data.vehicle_weight_kg if car_data else None
+
+        axle1_mass = attrs.get("axle1_load_kg", getattr(self.instance, "axle1_load_kg", None))
+        axle2_mass = attrs.get("axle2_load_kg", getattr(self.instance, "axle2_load_kg", None))
+        if (
+            drom_mass is not None
+            and axle1_mass is not None
+            and axle2_mass is not None
+            and drom_mass < axle1_mass + axle2_mass
+        ):
+            raise serializers.ValidationError({
+                "axle1_load_kg": "Суммарная нагрузка на оси не может превышать массу Drom."
+            })
+
         actual_speed = attrs.get(
             "actual_speed_kmh",
             getattr(self.instance, "actual_speed_kmh", None),
@@ -531,19 +572,9 @@ class ProtocolBrakeSerializer(
 
     def get_numeric_range_rules(self, attrs):
         rules = super().get_numeric_range_rules(attrs)
-        service_type = attrs.get(
-            "service_brake_type",
-            getattr(self.instance, "service_brake_type", None),
-        )
-        if service_type == "disc_disc":
-            difference_maxes = {"axle_1_brake_difference_pct": "20", "axle_2_brake_difference_pct": "20"}
-        elif service_type == "disc_drum":
-            difference_maxes = {"axle_1_brake_difference_pct": "20", "axle_2_brake_difference_pct": "25"}
-        else:
-            difference_maxes = {"axle_1_brake_difference_pct": "25", "axle_2_brake_difference_pct": "25"}
-        for field_name, maximum in difference_maxes.items():
+        for field_name in ("axle_1_brake_difference_pct", "axle_2_brake_difference_pct"):
             label = "Относительная разность тормозных сил колес оси 1" if field_name.startswith("axle_1") else "Относительная разность тормозных сил колес оси 2"
-            rules[field_name] = ("0", maximum, label, "%")
+            rules[field_name] = ("0", "14", label, "%")
 
         parking_type = attrs.get(
             "parking_brake_type",
@@ -801,6 +832,7 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             'owner_document',
             'owner_phone',
             'manufacturer_info',
+            'header_document_selections',
 
             'appendix_number',
             'commercial_name',
@@ -839,6 +871,9 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             'created_at',
             'updated_at',
         ]
+
+    def validate_owner_name(self, value):
+        return normalize_owner_name(value)
 
     def normalize_body_mark(self, value):
         return normalize_body_mark_value(value)

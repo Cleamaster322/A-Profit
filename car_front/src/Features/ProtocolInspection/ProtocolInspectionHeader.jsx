@@ -4,6 +4,25 @@ import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import TextField from "@mui/material/TextField";
 import Box from "@mui/material/Box";
+import Checkbox from "@mui/material/Checkbox";
+import FormControlLabel from "@mui/material/FormControlLabel";
+
+import {
+  headerOwnerFieldSx,
+  headerOwnerRowSx,
+  headerStackSx,
+  headerTripleRowSx,
+} from "./protocolInspectionStyles.jsx";
+
+const HEADER_DOCUMENT_OPTIONS = [
+  {value: "application", label: "Заявка"},
+  {value: "passport_scan", label: "Скан паспорта гражданина РФ"},
+  {value: "tpo", label: "ТПО"},
+  {value: "bill_of_lading", label: "Коносамент"},
+  {value: "kuts", label: "КУТС"},
+  {value: "vehicle_manual", label: "Руководство по эксплуатации ТС"},
+  {value: "sampling_data_disclaimer", label: "ИЛ не несет ответственность за данные отбора образца."},
+];
 
 function stripProtocolNumber(value) {
   if (value === null || value === undefined) {
@@ -70,28 +89,28 @@ function ProtocolInspectionHeader({
     });
   };
 
+  const handleHeaderDocumentChange = (value, checked) => {
+    const selected = form.header_document_selections || [];
+    const nextSelected = checked
+      ? [...new Set([...selected, value])]
+      : selected.filter((item) => item !== value);
+
+    handleChange({
+      target: {
+        name: "header_document_selections",
+        value: nextSelected,
+      },
+    });
+  };
+
   return (
     <Paper sx={sectionPaperSx}>
       <Typography variant="h5" sx={sectionTitleSx}>
         1. Шапка документа
       </Typography>
 
-      <Box
-        sx={{
-          display: "grid",
-          gap: 2,
-        }}
-      >
-        <Box
-          sx={{
-            display: "grid",
-            gridTemplateColumns: {
-              xs: "1fr",
-              md: "repeat(3, minmax(0, 1fr))",
-            },
-            gap: 2,
-          }}
-        >
+      <Box sx={headerStackSx}>
+        <Box sx={headerTripleRowSx}>
           <TextField
             fullWidth
             label="Номер протокола"
@@ -143,51 +162,27 @@ function ProtocolInspectionHeader({
           />
         </Box>
 
-        <Box
-          sx={{
-            display: "grid",
-            gridTemplateColumns: {
-              xs: "1fr",
-              md: "repeat(3, minmax(0, 1fr))",
-            },
-            gap: 2,
-          }}
-        >
+        <Box sx={headerOwnerRowSx}>
           <TextField
             fullWidth
-            label="Фамилия заказчика"
-            name="owner_last_name"
-            value={form.owner_last_name || ""}
+            label="ФИО заказчика"
+            name="owner_full_name"
+            value={form.owner_full_name || ""}
             onChange={handleChange}
-            sx={textFieldSx}
+            sx={headerOwnerFieldSx}
             slotProps={{
               inputLabel: {
                 shrink: true,
               },
             }}
           />
-
           <TextField
             fullWidth
-            label="Имя заказчика"
-            name="owner_first_name"
-            value={form.owner_first_name || ""}
+            label="Адрес заказчика"
+            name="owner_address"
+            value={form.owner_address || ""}
             onChange={handleChange}
-            sx={textFieldSx}
-            slotProps={{
-              inputLabel: {
-                shrink: true,
-              },
-            }}
-          />
-
-          <TextField
-            fullWidth
-            label="Отчество заказчика"
-            name="owner_middle_name"
-            value={form.owner_middle_name || ""}
-            onChange={handleChange}
-            sx={textFieldSx}
+            sx={headerOwnerFieldSx}
             slotProps={{
               inputLabel: {
                 shrink: true,
@@ -211,6 +206,32 @@ function ProtocolInspectionHeader({
             },
           }}
         />
+
+        <Box>
+          <Typography variant="h6" sx={{mb: 1}}>
+            Документы и сведения по отбору образца
+          </Typography>
+          <Box
+            sx={{
+              display: "grid",
+              gridTemplateColumns: {xs: "1fr", sm: "repeat(2, minmax(0, 1fr))"},
+              columnGap: 2,
+            }}
+          >
+            {HEADER_DOCUMENT_OPTIONS.map(({value, label}) => (
+              <FormControlLabel
+                key={value}
+                control={(
+                  <Checkbox
+                    checked={(form.header_document_selections || []).includes(value)}
+                    onChange={(event) => handleHeaderDocumentChange(value, event.target.checked)}
+                  />
+                )}
+                label={label}
+              />
+            ))}
+          </Box>
+        </Box>
       </Box>
     </Paper>
   );

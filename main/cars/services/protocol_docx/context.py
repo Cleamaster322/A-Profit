@@ -24,6 +24,15 @@ from .labels import (
 )
 
 DEFAULT_INSPECTION_PLACE = "690074, Россия, Приморский край, г. Владивосток, ул. Снеговая, д. 64"
+HEADER_DOCUMENT_LABELS = {
+    "application": "Заявка",
+    "passport_scan": "Скан паспорта гражданина РФ",
+    "tpo": "ТПО",
+    "bill_of_lading": "Коносамент",
+    "kuts": "КУТС",
+    "vehicle_manual": "Руководство по эксплуатации ТС",
+    "sampling_data_disclaimer": "ИЛ не несет ответственность за данные отбора образца.",
+}
 
 
 # =========================
@@ -40,8 +49,9 @@ def get_related(protocol, attr_name):
 def build_owner_info(protocol):
     parts = []
 
-    if protocol.owner_name:
-        parts.append(protocol.owner_name)
+    owner_full_name = build_owner_full_name(protocol)
+    if owner_full_name:
+        parts.append(owner_full_name)
 
     if protocol.owner_address:
         parts.append(protocol.owner_address)
@@ -56,6 +66,10 @@ def build_owner_info(protocol):
 
 
 def build_owner_full_name(protocol):
+    owner_name = getattr(protocol, "owner_name", None)
+    if owner_name and str(owner_name).strip():
+        return str(owner_name).strip()
+
     parts = [
         getattr(protocol, "owner_last_name", None),
         getattr(protocol, "owner_first_name", None),
@@ -71,6 +85,15 @@ def build_owner_full_name(protocol):
 
 def build_manufacturer_info(protocol):
     return fmt_text(getattr(protocol, "manufacturer_info", None))
+
+
+def build_submitted_documents(protocol):
+    selected = getattr(protocol, "header_document_selections", None) or []
+    return ", ".join(
+        label
+        for key, label in HEADER_DOCUMENT_LABELS.items()
+        if key in selected
+    )
 
 
 def normalize_light_color(value):
@@ -1650,6 +1673,7 @@ def build_protocol_docx_context(protocol):
         "owner_address": fmt_text(protocol.owner_address),
         "owner_phone": fmt_text(protocol.owner_phone),
         "manufacturer_info": build_manufacturer_info(protocol),
+        "submitted_documents": build_submitted_documents(protocol),
         "inspection_place": fmt_text(protocol.inspection_place, DEFAULT_INSPECTION_PLACE),
 
         # =========================

@@ -390,36 +390,6 @@ function ProtocolInspectionMisc({
                 })}
             </Grid>}
 
-            {!measurementMode && <Typography variant="h6" sx={subsectionTitleSx}>
-                Масса и нагрузка на ось
-            </Typography>}
-
-            {!measurementMode && <Grid container spacing={2}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Масса, кг",
-                    name: "vehicle_weight_kg",
-                    md: 4,
-                })}
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Ось 1, кг",
-                    name: "axle1_load_kg",
-                    md: 4,
-                })}
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Ось 2, кг",
-                    name: "axle2_load_kg",
-                    md: 4,
-                })}
-            </Grid>}
         </Paper>
     );
 }

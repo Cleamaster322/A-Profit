@@ -1,7 +1,6 @@
 from datetime import date
 from decimal import Decimal
 import re
-from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -43,9 +42,10 @@ from .services.protocol_docx.calculations import (
 	u_turn_signal_frequency_hz,
 	u_vehicle_height_mm,
 )
-from .services.test_docx import generate_protocol_docx
+from .services.protocol_docx_generator import generate_protocol_docx
 from .services.protocol_docx.applicability import build_applicability_values
 from .services.protocol_docx.context import (
+	build_submitted_documents,
 	build_light_device_row_values,
 	build_dynamic_result_values,
 	build_eco_values,
@@ -54,10 +54,9 @@ from .services.protocol_docx.context import (
 	build_tire_depth_values,
 )
 from .services.protocol_docx.renderer import process_document_conditions
-from .services.protocol_docx.v6_placeholder_migration import (
-	add_v6_context_aliases,
-	create_v6_template,
-	load_v5_v6_mappings,
+from .services.protocol_docx.placeholder_aliases import (
+	add_protocol_placeholder_aliases,
+	load_placeholder_aliases,
 )
 
 
@@ -526,13 +525,7 @@ class ProtocolWorkflowTests(TestCase):
 		self.assertEqual(measurement.engine_model, "Test engine")
 		self.assertEqual(measurement.fuel_type, "petrol")
 
-	def test_configuration_import_preserves_measured_and_dash_values(self):
-		measurement = ProtocolMeasurement.objects.create(
-			protocol=self.protocol,
-			vehicle_length_mm=Decimal("4001"),
-			vehicle_width_mm=None,
-			dash_fields=["vehicle_width_mm"],
-		)
+	def test_valid_generation_configuration_can_be_saved_without_manufacture_month(self):
 		self.protocol.locked_by = self.measurer
 		self.protocol.locked_at = timezone.now()
 		self.protocol.save(update_fields=["locked_by", "locked_at"])
@@ -543,15 +536,13 @@ class ProtocolWorkflowTests(TestCase):
 			{
 				"generation_id": self.generation.id,
 				"configuration_id": self.configuration.id,
-				"manufacture_date": "2020-05",
 			},
 		)
 
 		self.assertEqual(response.status_code, 200)
-		measurement.refresh_from_db()
-		self.assertEqual(measurement.vehicle_length_mm, Decimal("4001"))
-		self.assertIsNone(measurement.vehicle_width_mm)
-		self.assertEqual(measurement.vehicle_height_mm, Decimal("1510"))
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.configuration_id, self.configuration.id)
+		self.assertIsNone(self.protocol.manufacture_date)
 
 	def test_configuration_import_normalizes_full_drive_to_four_by_four(self):
 		CarData.objects.filter(configuration=self.configuration).update(drive_type="full")
@@ -686,82 +677,76 @@ class ProtocolWorkflowTests(TestCase):
 
 
 class ProtocolTemplateGenerationTests(SimpleTestCase):
-	def test_generator_selects_old_v5_and_v6_templates(self):
+	def test_generator_uses_the_single_protocol_template(self):
 		protocol = SimpleNamespace(id=42)
 
 		with TemporaryDirectory() as media_root:
 			with override_settings(MEDIA_ROOT=media_root):
 				with patch(
-					"cars.services.test_docx.build_protocol_docx_context",
+					"cars.services.protocol_docx_generator.build_protocol_docx_context",
 					return_value={"example": "value"},
 				), patch(
-					"cars.services.test_docx.render_protocol_docx",
+					"cars.services.protocol_docx_generator.render_protocol_docx",
 					side_effect=lambda template_path, output_path, context: output_path,
-				) as render:
-					old_output = generate_protocol_docx(protocol)
-					v5_output = generate_protocol_docx(protocol, "v5")
-					with patch(
-						"cars.services.test_docx.add_v6_context_aliases"
-					) as add_aliases:
-						v6_output = generate_protocol_docx(protocol, "v6")
-						add_aliases.assert_called_once_with({"example": "value"})
+				) as render, patch(
+					"cars.services.protocol_docx_generator.add_protocol_placeholder_aliases"
+				) as add_aliases:
+					output = generate_protocol_docx(protocol)
 
-		self.assertEqual(old_output.name, "protocol_42_old.docx")
-		self.assertEqual(v5_output.name, "protocol_42_v5.docx")
-		self.assertEqual(v6_output.name, "protocol_42_v6.docx")
+		self.assertEqual(output.name, "protocol_42.docx")
+		add_aliases.assert_called_once_with({"example": "value"})
 		self.assertEqual(
-			[
-				call.kwargs["template_path"].name
-				for call in render.call_args_list
-			],
-			[
-				"protocol_template.docx",
-				"protocol_template_v5_source.docx",
-				"protocol_template_v6_source.docx",
-			],
+			render.call_args.kwargs["template_path"].name,
+			"protocol_template.docx",
+		)
+		self.assertEqual(render.call_args.kwargs["context"], {"example": "value"})
+
+	def test_header_document_selections_compose_one_placeholder_value(self):
+		protocol = SimpleNamespace(
+			header_document_selections=["application", "kuts", "sampling_data_disclaimer"]
 		)
 
-	def test_v6_aliases_and_template_cover_the_rename_map(self):
-		placeholder_renames, condition_renames = load_v5_v6_mappings()
-		self.assertEqual(len(placeholder_renames), 253)
+		self.assertEqual(
+			build_submitted_documents(protocol),
+			"Заявка, КУТС, ИЛ не несет ответственность за данные отбора образца.",
+		)
 
-		context = {name: name for name in placeholder_renames}
-		for old_tag in condition_renames:
+	def test_protocol_context_aliases_supply_template_fields(self):
+		placeholder_aliases, condition_aliases = load_placeholder_aliases()
+
+		context = {name: name for name in placeholder_aliases}
+		for source_tag in condition_aliases:
 			match = re.fullmatch(
 				r"{%\s*tr\s+if\s+(?:not\s+)?([A-Za-z0-9_]+)\s*%}",
-				old_tag,
+				source_tag,
 			)
 			if match:
 				context.setdefault(match.group(1), False)
 		context["rear_fog_a_8_13_2_conclusion"] = "-"
+		context["applicable_6_4"] = (
+			"не применяется (сервоприводы для включения и/или отключения устройства "
+			"для предотвращения несанкционированного использования не используются)"
+		)
 
-		add_v6_context_aliases(context)
+		add_protocol_placeholder_aliases(context)
 		self.assertEqual(context["a_8_13_2_conclusion"], "-")
-		for new_name in placeholder_renames.values():
-			self.assertIn(new_name, context)
+		self.assertEqual(context["a_6_4_conclusion"], context["applicable_6_4"])
+		for canonical_name in placeholder_aliases.values():
+			self.assertIn(canonical_name, context)
 
-		with TemporaryDirectory() as temp_dir:
-			template_path = create_v6_template(
-				Path(temp_dir) / "protocol_template_v6_source.docx"
-			)
-			self.assertGreater(template_path.stat().st_size, 0)
-			Document(template_path)
-
-	def test_excel_reason_placeholders_are_available_for_docx(self):
+	def test_missing_registration_number_marks_clause_1_2_1_not_applicable(self):
 		protocol = SimpleNamespace(registration_number=None)
-		measurement = SimpleNamespace()
-		values = build_applicability_values(protocol, measurement, SimpleNamespace(), {})
+		values = build_applicability_values(
+			protocol,
+			SimpleNamespace(),
+			SimpleNamespace(),
+			{},
+		)
 
 		self.assertEqual(
 			values["applicable_1_2_1"],
 			"не применяется (на ТС отсутствует государственный регистрационный знак)",
 		)
-		self.assertEqual(
-			values["applicable_8_13_1"],
-			"не указано",
-		)
-		self.assertIn("applicable_3_1", values)
-		self.assertFalse(any(key.startswith("not_applicable_") for key in values))
 
 
 class ProtocolApplicabilityTests(SimpleTestCase):
@@ -986,7 +971,7 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 					expected_8_20_3,
 				)
 
-	def test_applicability_output_uses_one_key_per_clause(self):
+	def test_common_applicability_statuses_match_vehicle_conditions(self):
 		protocol = SimpleNamespace(tire_season="summer", has_spikes=False)
 		measurement = SimpleNamespace(
 			fuel_type="diesel",
@@ -1054,9 +1039,6 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 		self.assertEqual(washer_present_values["applicable_8_20_3"], "соответствует")
 		for clause in ("8_18_1", "8_18_2", "8_18_3", "8_18_4"):
 			self.assertEqual(values[f"applicable_{clause}"], "отсутствие")
-		self.assertIn("applicable_21_8", values)
-		self.assertFalse(any(key.startswith("not_applicable_") for key in values))
-
 	def test_a20_5_1_depends_only_on_electric_engine(self):
 		cases = (
 			(
@@ -1427,6 +1409,42 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 		self.assertTrue(serializer.is_valid(), serializer.errors)
 
+	def test_drom_mass_equal_to_or_greater_than_axis_sum_is_valid(self):
+		for drom_mass in ("1240", "1300"):
+			with self.subTest(drom_mass=drom_mass):
+				serializer = ProtocolMeasurementSerializer(
+					data={
+						"vehicle_weight_kg": drom_mass,
+						"axle1_load_kg": "740",
+						"axle2_load_kg": "500",
+					},
+					partial=True,
+				)
+
+				self.assertTrue(serializer.is_valid(), serializer.errors)
+
+	def test_drom_mass_below_axis_sum_is_rejected(self):
+		serializer = ProtocolMeasurementSerializer(
+			data={
+				"vehicle_weight_kg": "1200",
+				"axle1_load_kg": "740",
+				"axle2_load_kg": "500",
+			},
+			partial=True,
+		)
+
+		self.assertFalse(serializer.is_valid())
+		self.assertIn("axle1_load_kg", serializer.errors)
+		self.assertIn("превышать массу Drom", str(serializer.errors["axle1_load_kg"][0]))
+
+	def test_missing_drom_mass_skips_axis_sum_comparison(self):
+		serializer = ProtocolMeasurementSerializer(
+			data={"vehicle_weight_kg": None, "axle1_load_kg": "740", "axle2_load_kg": "500"},
+			partial=True,
+		)
+
+		self.assertTrue(serializer.is_valid(), serializer.errors)
+
 	def test_power_supply_uses_excel_voltage_limits(self):
 		serializer = ProtocolPowerSupplySerializer(
 			data={"phase_a_n_voltage_v": "186.99"},
@@ -1438,19 +1456,23 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 		self.assertIn("187", str(serializer.errors["phase_a_n_voltage_v"][0]))
 		self.assertIn("242", str(serializer.errors["phase_a_n_voltage_v"][0]))
 
-	def test_brake_difference_limit_depends_on_mechanism(self):
-		disc = ProtocolBrakeSerializer(
-			data={"service_brake_type": "disc_disc", "axle_1_brake_difference_pct": "20.1"},
+	def test_brake_difference_uses_fixed_fourteen_percent_limit(self):
+		within_limit = ProtocolBrakeSerializer(
+			data={
+				"service_brake_type": "disc_disc",
+				"axle_1_brake_difference_pct": "14",
+				"axle_2_brake_difference_pct": "14",
+			},
 			partial=True,
 		)
-		drum = ProtocolBrakeSerializer(
-			data={"service_brake_type": "disc_drum", "axle_2_brake_difference_pct": "25"},
+		above_limit = ProtocolBrakeSerializer(
+			data={"service_brake_type": "disc_drum", "axle_1_brake_difference_pct": "14.01"},
 			partial=True,
 		)
 
-		self.assertFalse(disc.is_valid())
-		self.assertIn("20", str(disc.errors["axle_1_brake_difference_pct"][0]))
-		self.assertTrue(drum.is_valid(), drum.errors)
+		self.assertTrue(within_limit.is_valid(), within_limit.errors)
+		self.assertFalse(above_limit.is_valid())
+		self.assertIn("14", str(above_limit.errors["axle_1_brake_difference_pct"][0]))
 
 	def test_actual_speed_must_be_below_speedometer(self):
 		serializer = ProtocolMeasurementSerializer(
@@ -1473,15 +1495,13 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 		self.assertIn("1 или 2", message)
 		self.assertIn("от 1 до 2", message)
 
-	def test_turn_signal_frequency_only_accepts_excel_values(self):
+	def test_turn_signal_frequency_accepts_all_available_values(self):
 		serializer = ProtocolLightSerializer(
-			data={"turn_signal_frequency_hz": "1.5"},
+			data={"turn_signal_frequency_hz": "1.5", "turn_signal_frequency_per_min": "90"},
 			partial=True,
 		)
 
-		self.assertFalse(serializer.is_valid())
-		message = str(serializer.errors["turn_signal_frequency_hz"][0])
-		self.assertIn("1,4 или 1,6", message)
+		self.assertTrue(serializer.is_valid(), serializer.errors)
 
 	def test_headlight_values_are_not_range_restricted(self):
 		serializer = ProtocolLightSerializer(

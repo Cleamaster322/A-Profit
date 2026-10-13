@@ -1,7 +1,19 @@
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
+import Box from "@mui/material/Box";
+import Table from "@mui/material/Table";
+import TableBody from "@mui/material/TableBody";
+import TableCell from "@mui/material/TableCell";
+import TableHead from "@mui/material/TableHead";
+import TableRow from "@mui/material/TableRow";
+import TextField from "@mui/material/TextField";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
+import {calculateBrakeMetrics, getDromMassComparisonError} from "./brakeCalculations.js";
+
+function formatMetric(value) {
+    return value === null ? "—" : value.toFixed(2).replace(".", ",");
+}
 
 function ProtocolInspectionBrakes({
                                       form,
@@ -11,7 +23,41 @@ function ProtocolInspectionBrakes({
                                       sectionPaperSx,
                                       sectionTitleSx,
                                       subsectionTitleSx,
+                                      dromMassKg,
                                   }) {
+    const metrics = calculateBrakeMetrics(form, dromMassKg);
+    const dromMassError = getDromMassComparisonError(form, dromMassKg);
+    const metricRows = [
+        {
+            label: "Удельная тормозная сила рабочей тормозной системы",
+            value: metrics.serviceSpecificForce,
+            min: 0.52,
+            max: 0.98,
+            unit: "",
+        },
+        {
+            label: "Удельная тормозная сила стояночной тормозной системы",
+            value: metrics.parkingSpecificForce,
+            min: 0.18,
+            max: 0.48,
+            unit: "",
+        },
+        {
+            label: "Относительная разность тормозных сил колес 1-й оси",
+            value: metrics.axle1DifferencePct,
+            min: 0,
+            max: 14,
+            unit: "%",
+        },
+        {
+            label: "Относительная разность тормозных сил колес 2-й оси",
+            value: metrics.axle2DifferencePct,
+            min: 0,
+            max: 14,
+            unit: "%",
+        },
+    ];
+
     return (
         <Paper sx={sectionPaperSx}>
             <Typography variant="h5" sx={sectionTitleSx}>
@@ -85,31 +131,7 @@ function ProtocolInspectionBrakes({
             </Grid>
 
             <Typography variant="h6" sx={subsectionTitleSx}>
-                Относительная разность тормозных сил
-            </Typography>
-
-            <Grid container spacing={2} sx={{mb: 3}}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Ось 1, %",
-                    name: "axle_1_brake_difference_pct",
-                    md: 6,
-                })}
-
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Ось 2, %",
-                    name: "axle_2_brake_difference_pct",
-                    md: 6,
-                })}
-            </Grid>
-
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Удельная тормозная сила рабочей тормозной системы
+                Тормозная сила рабочей тормозной системы
             </Typography>
 
             <Grid container spacing={2} sx={{mb: 3}}>
@@ -151,10 +173,10 @@ function ProtocolInspectionBrakes({
             </Grid>
 
             <Typography variant="h6" sx={subsectionTitleSx}>
-                Удельная тормозная сила стояночной тормозной системы
+                Тормозная сила стояночной тормозной системы
             </Typography>
 
-            <Grid container spacing={2}>
+            <Grid container spacing={2} sx={{mb: 3}}>
                 {renderField({
                     form,
                     handleChange,
@@ -173,6 +195,92 @@ function ProtocolInspectionBrakes({
                     md: 6,
                 })}
             </Grid>
+
+            <Typography variant="h6" sx={subsectionTitleSx}>
+                Масса и нагрузка на ось
+            </Typography>
+            <Grid container spacing={2} sx={{mb: 3}}>
+                <Grid size={{xs: 12, md: 3}}>
+                    <TextField
+                        id="drom_vehicle_weight_kg"
+                        label="Масса Drom, кг"
+                        value={metrics.dromMassKg === null ? "Нет массы Drom" : formatMetric(metrics.dromMassKg)}
+                        fullWidth
+                        slotProps={{input: {readOnly: true}}}
+                        sx={textFieldSx}
+                    />
+                </Grid>
+                <Grid size={{xs: 12, md: 3}}>
+                    <TextField
+                        id="calculated_axle_mass_kg"
+                        label="Расчетная масса, кг"
+                        value={metrics.calculatedAxleMassKg === null ? "" : formatMetric(metrics.calculatedAxleMassKg)}
+                        error={Boolean(dromMassError)}
+                        helperText={dromMassError || (metrics.dromMassKg === null ? "Сравнение с массой Drom пропускается" : "")}
+                        fullWidth
+                        slotProps={{input: {readOnly: true}}}
+                        sx={textFieldSx}
+                    />
+                </Grid>
+                {renderField({
+                    form,
+                    handleChange,
+                    textFieldSx,
+                    label: "Ось 1, кг",
+                    name: "axle1_load_kg",
+                    md: 3,
+                })}
+                {renderField({
+                    form,
+                    handleChange,
+                    textFieldSx,
+                    label: "Ось 2, кг",
+                    name: "axle2_load_kg",
+                    md: 3,
+                })}
+            </Grid>
+
+            <Box sx={{mt: 3, overflowX: "auto"}}>
+                <Typography variant="h6" sx={subsectionTitleSx}>
+                    Проверка расчетных показателей
+                </Typography>
+                <Table size="small" sx={{minWidth: 620}} aria-label="Проверка расчетных показателей тормозной системы">
+                    <TableHead>
+                        <TableRow>
+                            <TableCell>Показатель</TableCell>
+                            <TableCell align="right">Расчет</TableCell>
+                            <TableCell>Допустимый диапазон</TableCell>
+                            <TableCell>Проверка</TableCell>
+                        </TableRow>
+                    </TableHead>
+                    <TableBody>
+                        {metricRows.map((metric) => {
+                            const hasValue = metric.value !== null;
+                            const inRange = hasValue && metric.value >= metric.min && metric.value <= metric.max;
+                            const state = !hasValue
+                                ? {label: "Недостаточно данных", color: "text.secondary"}
+                                : inRange
+                                    ? {label: "В норме", color: "success.main"}
+                                    : {label: "Вне диапазона", color: "error.main"};
+
+                            return (
+                                <TableRow key={metric.label}>
+                                    <TableCell>{metric.label}</TableCell>
+                                    <TableCell align="right">
+                                        {formatMetric(metric.value)}{metric.unit ? ` ${metric.unit}` : ""}
+                                    </TableCell>
+                                    <TableCell>
+                                        {formatMetric(metric.min)}–{formatMetric(metric.max)}{metric.unit ? ` ${metric.unit}` : ""}
+                                    </TableCell>
+                                    <TableCell sx={{color: state.color, fontWeight: 700}}>
+                                        {state.label}
+                                    </TableCell>
+                                </TableRow>
+                            );
+                        })}
+                    </TableBody>
+                </Table>
+            </Box>
         </Paper>
     );
 }

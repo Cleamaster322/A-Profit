@@ -129,13 +129,13 @@ def get_vehicle_mass_for_brake_calc(measurement):
     2) масса ТС;
     3) None, если данных нет.
     """
-    axle_mass_kg = sum_decimal(
-        get_value(measurement, "axle1_load_kg"),
-        get_value(measurement, "axle2_load_kg"),
-    )
+    axle1_mass_kg = decimal_value(get_value(measurement, "axle1_load_kg"))
+    axle2_mass_kg = decimal_value(get_value(measurement, "axle2_load_kg"))
 
-    if axle_mass_kg is not None and axle_mass_kg != 0:
-        return axle_mass_kg
+    if axle1_mass_kg is not None and axle2_mass_kg is not None:
+        axle_mass_kg = axle1_mass_kg + axle2_mass_kg
+        if axle_mass_kg != 0:
+            return axle_mass_kg
 
     vehicle_weight_kg = decimal_value(
         get_value(measurement, "vehicle_weight_kg")

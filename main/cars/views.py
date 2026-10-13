@@ -59,7 +59,7 @@ from .serializers import (
     CreateUserSerializer,
     UpdateUserSerializer,
 )
-from .services.test_docx import generate_protocol_docx
+from .services.protocol_docx_generator import generate_protocol_docx
 from .services.protocol_pdf import cleanup_pdf_preview, convert_docx_to_pdf
 from .word_utils import create_car_word_doc
 
@@ -1847,10 +1847,14 @@ def select_protocol_configuration(request, pk):
                 measurement_dash_fields = set(measurement.dash_fields or [])
                 measurement_update_fields = []
                 for field_name, value in defaults['measurement'].items():
+                    is_drom_mass = field_name == 'vehicle_weight_kg'
                     if (
                         field_name not in measurement_dash_fields
-                        and value is not None
-                        and getattr(measurement, field_name) in (None, '')
+                        and (
+                            is_drom_mass
+                            or (value is not None and getattr(measurement, field_name) in (None, ''))
+                        )
+                        and getattr(measurement, field_name) != value
                     ):
                         setattr(measurement, field_name, value)
                         measurement_update_fields.append(field_name)
@@ -2959,14 +2963,7 @@ def generate_protocol_docx_file(request, protocol_id):
         if not user_can_access_protocol(request, protocol):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
-        template_variant = request.data.get('template', 'old')
-        try:
-            file_path = generate_protocol_docx(protocol, template_variant)
-        except ValueError as error:
-            return Response(
-                {'error': str(error)},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+        file_path = generate_protocol_docx(protocol)
 
         return FileResponse(
             open(file_path, 'rb'),

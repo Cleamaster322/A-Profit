@@ -230,10 +230,10 @@ class ApiClient {
         return this.client.delete(url, config);
     }
 
-    generateProtocolDocx(protocolId, templateVariant = "old") {
+    generateProtocolDocx(protocolId) {
         return this.client.post(
             `/cars/protocols/${protocolId}/generate-docx/`,
-            { template: templateVariant },
+            {},
             {
                 responseType: "blob",
             }

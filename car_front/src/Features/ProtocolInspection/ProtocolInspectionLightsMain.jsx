@@ -130,22 +130,26 @@ function ProtocolInspectionLightsMain({
             </Typography>
 
             <Grid container spacing={2}>
-                {renderField({
+                {renderSelect({
                     form,
                     handleChange,
-                    textFieldSx,
-                    label: "Пр./мин.",
-                    name: "turn_signal_frequency_per_min",
-                    md: 6,
-                })}
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
+                    selectFieldSx,
                     label: "Гц",
                     name: "turn_signal_frequency_hz",
                     md: 6,
+                    options: [
+                        {value: "1.4", label: "1,4"},
+                        {value: "1.5", label: "1,5"},
+                        {value: "1.6", label: "1,6"},
+                    ],
                 })}
+                <Grid size={{xs: 12, md: 6}} sx={{display: "flex", alignItems: "center"}}>
+                    <Typography>
+                        {form.turn_signal_frequency_hz
+                            ? `${Math.round(Number(form.turn_signal_frequency_hz) * 60)} пр./мин.`
+                            : "Проблесков в минуту: —"}
+                    </Typography>
+                </Grid>
             </Grid>
         </Paper>
     );

@@ -275,6 +275,7 @@ class Protocol(DashFieldsMixin, models.Model):
 
     # Изготовитель
     manufacturer_info = models.TextField(blank=True, null=True)
+    header_document_selections = models.JSONField(default=list, blank=True)
 
     appendix_number = models.CharField(max_length=100, blank=True, null=True)
     commercial_name = models.CharField(max_length=255, blank=True, null=True)
