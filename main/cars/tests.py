@@ -32,6 +32,7 @@ from .serializers import (
 )
 from .services.protocol_docx.calculations import (
 	calc_light_absorption_uncertainty,
+	calc_axle_load_sum_kg,
 	standard_headlight_uncertainty_cd,
 	u_control_force_n,
 	u_glass_transparency_pct,
@@ -1513,6 +1514,15 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 
 class ProtocolCalculationTests(TestCase):
+	def test_calculated_vehicle_mass_is_the_sum_of_both_axles(self):
+		self.assertEqual(
+			calc_axle_load_sum_kg(
+				SimpleNamespace(axle1_load_kg=Decimal("500"), axle2_load_kg=Decimal("340"))
+			),
+			Decimal("840"),
+		)
+		self.assertIsNone(calc_axle_load_sum_kg(SimpleNamespace(axle1_load_kg=500)))
+
 	def test_light_absorption_uncertainty_uses_type_b_for_equal_readings(self):
 		measurement = SimpleNamespace(
 			light_absorption_1=Decimal("0.10"),

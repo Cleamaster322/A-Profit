@@ -7,6 +7,7 @@ from .applicability import build_applicability_values
 from .calculations import (
     build_calculated_values,
     build_uncertainty_values,
+    calc_axle_load_sum_kg,
     calc_light_absorption_average,
 )
 from .formatters import decimal_value, fmt_bool, fmt_date, fmt_int, fmt_num, fmt_text
@@ -1843,10 +1844,9 @@ def build_protocol_docx_context(protocol):
         "vehicle_width_mm": fmt_num(getattr(measurement, "vehicle_width_mm", None), 1),
         "vehicle_height_mm": fmt_num(getattr(measurement, "vehicle_height_mm", None), 1),
         "vehicle_weight_kg": fmt_num(getattr(measurement, "vehicle_weight_kg", None), 0),
+        "calculated_axle_mass_kg": fmt_num(calc_axle_load_sum_kg(measurement), 2),
         "axle1_load_kg": fmt_num(getattr(measurement, "axle1_load_kg", None), 0),
         "axle2_load_kg": fmt_num(getattr(measurement, "axle2_load_kg", None), 0),
-        "stand_axle1_load_kg": fmt_num(getattr(measurement, "stand_axle1_load_kg", None), 0),
-        "stand_axle2_load_kg": fmt_num(getattr(measurement, "stand_axle2_load_kg", None), 0),
 
         "mileage_km": fmt_num(getattr(measurement, "mileage_km", None), 0),
         "spare_wheel_present_label": fmt_bool(

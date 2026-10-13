@@ -486,10 +486,6 @@ class ProtocolMeasurement(DashFieldsMixin, models.Model):
     axle1_load_kg = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     axle2_load_kg = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
 
-    # Нагрузка на ось на тормозном стенде
-    stand_axle1_load_kg = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-    stand_axle2_load_kg = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
-
     # Новые поля под актуальную версию протокола
     mileage_km = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
     spare_wheel_present = models.BooleanField(blank=True, null=True)

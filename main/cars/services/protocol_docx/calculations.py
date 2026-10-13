@@ -129,13 +129,9 @@ def get_vehicle_mass_for_brake_calc(measurement):
     2) масса ТС;
     3) None, если данных нет.
     """
-    axle1_mass_kg = decimal_value(get_value(measurement, "axle1_load_kg"))
-    axle2_mass_kg = decimal_value(get_value(measurement, "axle2_load_kg"))
-
-    if axle1_mass_kg is not None and axle2_mass_kg is not None:
-        axle_mass_kg = axle1_mass_kg + axle2_mass_kg
-        if axle_mass_kg != 0:
-            return axle_mass_kg
+    axle_mass_kg = calc_axle_load_sum_kg(measurement)
+    if axle_mass_kg is not None and axle_mass_kg != 0:
+        return axle_mass_kg
 
     vehicle_weight_kg = decimal_value(
         get_value(measurement, "vehicle_weight_kg")
@@ -145,6 +141,14 @@ def get_vehicle_mass_for_brake_calc(measurement):
         return vehicle_weight_kg
 
     return None
+
+
+def calc_axle_load_sum_kg(measurement):
+    axle1_mass_kg = decimal_value(get_value(measurement, "axle1_load_kg"))
+    axle2_mass_kg = decimal_value(get_value(measurement, "axle2_load_kg"))
+    if axle1_mass_kg is None or axle2_mass_kg is None:
+        return None
+    return axle1_mass_kg + axle2_mass_kg
 
 
 # =========================
@@ -622,16 +626,6 @@ def u_scale_kg():
     return expanded_from_standard(standard_u)
 
 
-def u_stand_load_kg(value):
-    """
-    Нагрузка на ось на тормозном стенде:
-    относительная погрешность ±3 %
-
-    U = 1.65 * ((value * 3 / 100) / sqrt(3))
-    """
-    return expanded_from_standard(standard_stand_load_kg(value))
-
-
 # =========================
 # Тормоза: неопределенности
 # =========================
@@ -1022,13 +1016,6 @@ def build_uncertainty_values(protocol=None):
 
     scale_u = u_scale_kg()
 
-    stand_axle1_u = u_stand_load_kg(
-        get_value(measurement, "stand_axle1_load_kg")
-    )
-    stand_axle2_u = u_stand_load_kg(
-        get_value(measurement, "stand_axle2_load_kg")
-    )
-
     service_control_force_axle1_u = u_control_force_n(
         get_value(brake, "service_brake_control_force_axle1_n")
     )
@@ -1095,12 +1082,6 @@ def build_uncertainty_values(protocol=None):
         "u_vehicle_weight_kg": fmt_num(scale_u, 0),
         "u_axle1_load_kg": fmt_num(scale_u, 0),
         "u_axle2_load_kg": fmt_num(scale_u, 0),
-
-        # =========================
-        # Нагрузка на оси на тормозном стенде
-        # =========================
-        "u_stand_axle1_load_kg": fmt_num(stand_axle1_u, 2),
-        "u_stand_axle2_load_kg": fmt_num(stand_axle2_u, 2),
 
         # =========================
         # Тормоза

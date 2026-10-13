@@ -19,8 +19,6 @@ const NUMERIC_RANGE_RULES = {
     service_brake_rear_right_kn: {min: 0, max: 30, label: "Тормозная сила заднего правого колеса", unit: "кН"},
     parking_brake_left_kn: {min: 0, max: 30, label: "Тормозная сила стояночной системы, левое колесо", unit: "кН"},
     parking_brake_right_kn: {min: 0, max: 30, label: "Тормозная сила стояночной системы, правое колесо", unit: "кН"},
-    stand_axle1_load_kg: {min: 0, max: 3500, label: "Нагрузка на ось 1 на тормозном стенде", unit: "кг"},
-    stand_axle2_load_kg: {min: 0, max: 3500, label: "Нагрузка на ось 2 на тормозном стенде", unit: "кг"},
     bumper_to_body_distance_mm: {min: 0, max: 20, label: "Расстояние от края бампера до кузова", unit: "мм"},
     sun_strip_width_mm: {min: 0, max: 140, label: "Ширина светозащитной полосы", unit: "мм"},
     speed_by_speedometer_kmh: {min: 21, max: 21, label: "Скорость по спидометру", unit: "км/ч"},
