@@ -14,12 +14,12 @@ function ProtocolInspectionLightsMain({
                                           subsectionTitleSx,
                                       }) {
     const lightPairs = [
+        ["Фонарь освещения ГРЗ", "plate_light_count", "plate_light_color", [1, 2]],
         ["Фара дальнего света", "high_beam_count", "high_beam_color", [2, 4]],
         ["Передняя ПТФ", "front_fog_count", "front_fog_color", [2]],
         ["Фонарь заднего хода", "reverse_light_count", "reverse_light_color", [1, 2]],
         ["Сигнал торможения дополнительный", "additional_brake_signal_count", "additional_brake_signal_color", [1, 2]],
         ["Задний ПТФ", "rear_fog_count", "rear_fog_color", [1, 2]],
-        ["Подсветка госномера", "plate_light_count", "plate_light_color", [1, 2]],
         ["ДХО", "daytime_running_light_count", "daytime_running_light_color", [2]],
         ["Стояночные огни передние", "parking_light_count", "parking_light_color", [2]],
         ["Стояночные огни задние", "rear_parking_light_count", "rear_parking_light_color", [2]],

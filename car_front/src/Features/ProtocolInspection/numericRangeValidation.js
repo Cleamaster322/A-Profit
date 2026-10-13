@@ -11,6 +11,10 @@ const NUMERIC_RANGE_RULES = {
     voltage_phase_ab: {min: 332, max: 418, label: "Фаза A–B", unit: "В"},
     voltage_phase_bc: {min: 332, max: 418, label: "Фаза B–C", unit: "В"},
     voltage_phase_ac: {min: 332, max: 418, label: "Фаза A–C", unit: "В"},
+    steering_backlash_deg: {min: 0, max: 10, label: "Люфт в рулевом управлении", unit: "°"},
+    glass_transparency_right_pct: {min: 70, max: 100, label: "Светопропускание правого стекла", unit: "%"},
+    glass_transparency_left_pct: {min: 70, max: 100, label: "Светопропускание левого стекла", unit: "%"},
+    glass_transparency_windshield_pct: {min: 70, max: 100, label: "Светопропускание ветрового стекла", unit: "%"},
     service_brake_control_force_axle1_n: {min: 0, max: 490, label: "Усилие на органе рабочей тормозной системы, ось 1", unit: "Н"},
     service_brake_control_force_axle2_n: {min: 0, max: 490, label: "Усилие на органе рабочей тормозной системы, ось 2", unit: "Н"},
     service_brake_front_left_kn: {min: 0, max: 30, label: "Тормозная сила переднего левого колеса", unit: "кН"},
@@ -19,10 +23,21 @@ const NUMERIC_RANGE_RULES = {
     service_brake_rear_right_kn: {min: 0, max: 30, label: "Тормозная сила заднего правого колеса", unit: "кН"},
     parking_brake_left_kn: {min: 0, max: 30, label: "Тормозная сила стояночной системы, левое колесо", unit: "кН"},
     parking_brake_right_kn: {min: 0, max: 30, label: "Тормозная сила стояночной системы, правое колесо", unit: "кН"},
+    low_beam_upper_point_mm: {min: 500, max: 1200, label: "Фара ближнего света по высоте вверх", unit: "мм"},
+    low_beam_lower_point_mm: {min: 500, max: 1200, label: "Фара ближнего света по высоте вниз", unit: "мм"},
+    fog_light_left_distance_mm: {min: 0, max: 400, label: "Передние противотуманные фары по ширине, левая", unit: "мм"},
+    fog_light_right_distance_mm: {min: 0, max: 400, label: "Передние противотуманные фары по ширине, правая", unit: "мм"},
+    fog_light_upper_point_mm: {min: 0, max: 800, label: "Передние противотуманные фары по высоте вверх", unit: "мм"},
+    fog_light_lower_point_mm: {min: 0, max: 800, label: "Передние противотуманные фары по высоте вниз", unit: "мм"},
+    left_34v_cd: {min: 0, max: 750, label: "Сила света фар 34′, левая", unit: "кд"},
+    right_34v_cd: {min: 0, max: 750, label: "Сила света фар 34′, правая", unit: "кд"},
+    left_52h_cd: {min: 1600, max: 150000, label: "Сила света фар 52′, левая", unit: "кд"},
+    right_52h_cd: {min: 1600, max: 150000, label: "Сила света фар 52′, правая", unit: "кд"},
+    left_high_beam_cd: {min: 20000, max: 150000, label: "Сила света фары дальнего света, левая", unit: "кд"},
+    right_high_beam_cd: {min: 20000, max: 150000, label: "Сила света фары дальнего света, правая", unit: "кд"},
     bumper_to_body_distance_mm: {min: 0, max: 20, label: "Расстояние от края бампера до кузова", unit: "мм"},
     sun_strip_width_mm: {min: 0, max: 140, label: "Ширина светозащитной полосы", unit: "мм"},
-    speed_by_speedometer_kmh: {min: 21, max: 21, label: "Скорость по спидометру", unit: "км/ч"},
-    actual_speed_kmh: {min: 20, max: 20, label: "Фактическая скорость", unit: "км/ч"},
+    speed_by_speedometer_kmh: {min: 20, max: 30, label: "Скорость по спидометру", unit: "км/ч"},
     exhaust_noise_constant_db: {min: 0, max: 96, label: "Шум на постоянных оборотах", unit: "дБА"},
     exhaust_noise_deceleration_db: {min: 0, max: 96, label: "Шум при замедлении", unit: "дБА"},
     co_min_pct: {min: 0, max: 0.3, label: "CO на минимальных оборотах", unit: "%"},
@@ -75,6 +90,13 @@ const TIRE_DEPTH_FIELDS = new Set([
     "tire_depth_rl_mm",
     "tire_depth_rr_mm",
 ]);
+
+const UPPER_LOWER_MEASUREMENT_PAIRS = [
+    {upper: "low_beam_upper_point_mm", lower: "low_beam_lower_point_mm", label: "Фара ближнего света"},
+    {upper: "fog_light_upper_point_mm", lower: "fog_light_lower_point_mm", label: "Передние противотуманные фары"},
+    {upper: "brake_signal_upper_point_mm", lower: "brake_signal_lower_point_mm", label: "Сигналы торможения"},
+    {upper: "rear_fog_upper_point_mm", lower: "rear_fog_lower_point_mm", label: "Задние противотуманные фонари"},
+];
 
 function getNumericRule(fieldName, form) {
     if (TIRE_DEPTH_FIELDS.has(fieldName)) {
@@ -143,6 +165,25 @@ export function getNumericRangeError(fieldName, form) {
     return "";
 }
 
+function getUpperLowerOrderError(fieldName, form) {
+    const pair = UPPER_LOWER_MEASUREMENT_PAIRS.find(
+        ({upper, lower}) => fieldName === upper || fieldName === lower,
+    );
+    if (!pair) return "";
+
+    const upperValue = parseNumericValue(form[pair.upper]);
+    const lowerValue = parseNumericValue(form[pair.lower]);
+    if (!Number.isFinite(upperValue) || !Number.isFinite(lowerValue) || upperValue > lowerValue) {
+        return "";
+    }
+
+    return `${pair.label}: верхнее значение должно быть больше нижнего.`;
+}
+
+export function getNumericFieldError(fieldName, form) {
+    return getNumericRangeError(fieldName, form) || getUpperLowerOrderError(fieldName, form);
+}
+
 export function validateProtocolNumericRanges(form) {
     const errors = [];
     for (const fieldName of Object.keys(NUMERIC_RANGE_RULES)) {
@@ -152,6 +193,10 @@ export function validateProtocolNumericRanges(form) {
     for (const fieldName of TIRE_DEPTH_FIELDS) {
         const message = getNumericRangeError(fieldName, form);
         if (message) errors.push({fieldName, message});
+    }
+    for (const pair of UPPER_LOWER_MEASUREMENT_PAIRS) {
+        const message = getUpperLowerOrderError(pair.upper, form);
+        if (message) errors.push({fieldName: pair.upper, message});
     }
     const actual = parseNumericValue(form.actual_speed_kmh);
     const speedometer = parseNumericValue(form.speed_by_speedometer_kmh);

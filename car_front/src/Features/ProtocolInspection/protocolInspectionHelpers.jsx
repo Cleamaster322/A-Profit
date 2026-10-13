@@ -9,7 +9,8 @@ import MenuItem from "@mui/material/MenuItem";
 import FormControl from "@mui/material/FormControl";
 import InputLabel from "@mui/material/InputLabel";
 import Select from "@mui/material/Select";
-import {getNumericRangeError} from "./numericRangeValidation.js";
+import {getNumericFieldError, getNumericRangeError} from "./numericRangeValidation.js";
+import {getProtocolTextFieldError} from "./protocolTextValidation.js";
 
 export function renderField({
   form,
@@ -22,7 +23,9 @@ export function renderField({
   multiline = false,
   minRows = 1,
 }) {
-  const rangeError = getNumericRangeError(name, form);
+  const rangeError = getNumericFieldError(name, form);
+  const textError = getProtocolTextFieldError(name, form[name]);
+  const errorMessage = rangeError || textError;
 
   return (
     <Grid size={{ xs: 12, md }}>
@@ -36,8 +39,8 @@ export function renderField({
         placeholder={placeholder}
         multiline={multiline}
         minRows={minRows}
-        error={Boolean(rangeError)}
-        helperText={rangeError || undefined}
+        error={Boolean(errorMessage)}
+        helperText={errorMessage || undefined}
         sx={textFieldSx}
       />
     </Grid>
@@ -158,7 +161,7 @@ export function renderLightPair({
         sx={{m: 0}}
       />
 
-      {showColor ? (
+      {showColor ? (isPresent ? (
         <Box className="light-color">
           <TextField
             label="Цвет"
@@ -170,7 +173,7 @@ export function renderLightPair({
             sx={textFieldSx}
           />
         </Box>
-      ) : (
+      ) : null) : (
         <Box className="light-quantity">
           {!isPresent ? (
             <Typography color="text.secondary">Отсутствует</Typography>

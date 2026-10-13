@@ -1,6 +1,7 @@
 from datetime import date
 from decimal import Decimal
 import re
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -54,7 +55,7 @@ from .services.protocol_docx.context import (
 	build_rear_fog_values,
 	build_tire_depth_values,
 )
-from .services.protocol_docx.renderer import process_document_conditions
+from .services.protocol_docx.renderer import process_document_conditions, render_protocol_docx
 from .services.protocol_docx.placeholder_aliases import (
 	add_protocol_placeholder_aliases,
 	load_placeholder_aliases,
@@ -691,16 +692,42 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 					side_effect=lambda template_path, output_path, context: output_path,
 				) as render, patch(
 					"cars.services.protocol_docx_generator.add_protocol_placeholder_aliases"
-				) as add_aliases:
+				) as add_aliases, patch(
+					"cars.services.protocol_docx_generator.count_word_pages",
+					side_effect=[40, 40],
+				) as count_pages:
 					output = generate_protocol_docx(protocol)
 
 		self.assertEqual(output.name, "protocol_42.docx")
-		add_aliases.assert_called_once_with({"example": "value"})
+		self.assertEqual(add_aliases.call_count, 1)
+		self.assertEqual(add_aliases.call_args.args[0]["example"], "value")
+		self.assertEqual(render.call_count, 2)
+		self.assertEqual(count_pages.call_count, 2)
 		self.assertEqual(
 			render.call_args.kwargs["template_path"].name,
 			"protocol_template.docx",
 		)
-		self.assertEqual(render.call_args.kwargs["context"], {"example": "value"})
+		self.assertEqual(
+			render.call_args.kwargs["context"],
+			{"example": "value", "protocol_page_count": "40"},
+		)
+
+	def test_protocol_page_count_placeholder_is_replaced_with_word_page_count(self):
+		with TemporaryDirectory() as temp_dir:
+			template_path = Path(temp_dir) / "template.docx"
+			output_path = Path(temp_dir) / "output.docx"
+			template = Document()
+			paragraph = template.add_paragraph()
+			paragraph.add_run("Оформлен на ")
+			paragraph.add_run("{{ protocol_page_count }}")
+			paragraph.add_run(" л.")
+			template.save(template_path)
+
+			render_protocol_docx(template_path, output_path, {"protocol_page_count": "40"})
+			generated = Document(output_path)
+
+		self.assertEqual(generated.paragraphs[0].text, "Оформлен на 40 л.")
+		self.assertFalse(generated.paragraphs[0]._p.xpath(".//w:instrText"))
 
 	def test_header_document_selections_compose_one_placeholder_value(self):
 		protocol = SimpleNamespace(
@@ -1475,15 +1502,23 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 		self.assertFalse(above_limit.is_valid())
 		self.assertIn("14", str(above_limit.errors["axle_1_brake_difference_pct"][0]))
 
-	def test_actual_speed_must_be_below_speedometer(self):
+	def test_speedometer_range_and_actual_speed_calculation(self):
 		serializer = ProtocolMeasurementSerializer(
-			data={"actual_speed_kmh": "20", "speed_by_speedometer_kmh": "20"},
+			data={"actual_speed_kmh": "999", "speed_by_speedometer_kmh": "21"},
 			partial=True,
 		)
 
-		self.assertFalse(serializer.is_valid())
-		self.assertIn("speed_by_speedometer_kmh", serializer.errors)
-		self.assertIn("21", str(serializer.errors["speed_by_speedometer_kmh"][0]))
+		self.assertTrue(serializer.is_valid(), serializer.errors)
+		self.assertEqual(serializer.validated_data["actual_speed_kmh"], Decimal("20.0"))
+
+		for invalid_speed in ("19.99", "30.01"):
+			with self.subTest(speedometer_speed=invalid_speed):
+				invalid = ProtocolMeasurementSerializer(
+					data={"speed_by_speedometer_kmh": invalid_speed},
+					partial=True,
+				)
+				self.assertFalse(invalid.is_valid())
+				self.assertIn("speed_by_speedometer_kmh", invalid.errors)
 
 	def test_non_headlight_light_count_uses_allowed_discrete_values(self):
 		serializer = ProtocolLightSerializer(
@@ -1504,13 +1539,38 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 		self.assertTrue(serializer.is_valid(), serializer.errors)
 
-	def test_headlight_values_are_not_range_restricted(self):
-		serializer = ProtocolLightSerializer(
-			data={"low_beam_count": 4, "front_fog_count": 3, "left_high_beam_cd": "200000"},
-			partial=True,
+	def test_lighting_measurement_ranges_match_reference_table(self):
+		cases = (
+			("low_beam_upper_point_mm", "499.99"),
+			("low_beam_lower_point_mm", "1200.01"),
+			("fog_light_left_distance_mm", "400.01"),
+			("fog_light_upper_point_mm", "800.01"),
+			("left_34v_cd", "750.01"),
+			("left_52h_cd", "1599.99"),
+			("right_52h_cd", "150000.01"),
+			("left_high_beam_cd", "19999.99"),
+			("right_high_beam_cd", "150000.01"),
 		)
 
-		self.assertTrue(serializer.is_valid(), serializer.errors)
+		for field_name, value in cases:
+			with self.subTest(field_name=field_name, value=value):
+				serializer = ProtocolLightSerializer(data={field_name: value}, partial=True)
+				self.assertFalse(serializer.is_valid())
+				self.assertIn(field_name, serializer.errors)
+
+	def test_steering_backlash_and_glass_transparency_ranges_match_reference_table(self):
+		cases = (
+			(ProtocolMeasurementSerializer, "steering_backlash_deg", "10.01"),
+			(ProtocolMeasurementSerializer, "glass_transparency_right_pct", "69.99"),
+			(ProtocolMeasurementSerializer, "glass_transparency_left_pct", "100.01"),
+			(ProtocolMeasurementSerializer, "glass_transparency_windshield_pct", "69.99"),
+		)
+
+		for serializer_class, field_name, value in cases:
+			with self.subTest(field_name=field_name, value=value):
+				serializer = serializer_class(data={field_name: value}, partial=True)
+				self.assertFalse(serializer.is_valid())
+				self.assertIn(field_name, serializer.errors)
 
 
 class ProtocolCalculationTests(TestCase):

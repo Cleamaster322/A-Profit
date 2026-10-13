@@ -1,9 +1,11 @@
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
+import TextField from "@mui/material/TextField";
 import Checkbox from "@mui/material/Checkbox";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
+import {calculateMeasuredSpeedKmh} from "./speedCalculations.js";
 
 function ProtocolInspectionMisc({
                                     form,
@@ -15,6 +17,8 @@ function ProtocolInspectionMisc({
                                     sectionTitleSx,
                                     subsectionTitleSx,
                                 }) {
+    const measuredSpeedKmh = calculateMeasuredSpeedKmh(form.speed_by_speedometer_kmh);
+
     return (
         <Paper sx={sectionPaperSx}>
             <Typography variant="h5" sx={sectionTitleSx}>
@@ -240,19 +244,21 @@ function ProtocolInspectionMisc({
                     form,
                     handleChange,
                     textFieldSx,
-                    label: "По спидометру, км/ч",
+                    label: "Заданная скорость по спидометру, км/ч",
                     name: "speed_by_speedometer_kmh",
                     md: 6,
                 })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Фактическая, км/ч",
-                    name: "actual_speed_kmh",
-                    md: 6,
-                })}
+                <Grid size={{xs: 12, md: 6}}>
+                    <TextField
+                        id="actual_speed_kmh"
+                        label="Скорость по прибору, км/ч (расчетная)"
+                        value={measuredSpeedKmh}
+                        fullWidth
+                        slotProps={{input: {readOnly: true}}}
+                        sx={textFieldSx}
+                    />
+                </Grid>
             </Grid>
 
             <Typography variant="h6" sx={subsectionTitleSx}>

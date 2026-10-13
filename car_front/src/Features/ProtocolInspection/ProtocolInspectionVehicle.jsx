@@ -202,14 +202,22 @@ function ProtocolInspectionVehicle({
             </Grid>
 
             <Grid container spacing={2}>
-                {renderField({
+                {renderSelect({
                     form,
                     handleChange,
-                    textFieldSx,
+                    selectFieldSx,
                     label: "Количество посадочных мест",
                     name: "seats_count",
                     md: 12,
-                    placeholder: "2/2 или 2/3",
+                    options: [
+                        {value: "2", label: "2"},
+                        {value: "2/2", label: "2/2"},
+                        {value: "2/3", label: "2/3"},
+                        {value: "2/2/2", label: "2/2/2"},
+                        {value: "2/2/3", label: "2/2/3"},
+                        {value: "2/3/2", label: "2/3/2"},
+                        {value: "2/3/3", label: "2/3/3"},
+                    ],
                 })}
             </Grid>
         </Paper>

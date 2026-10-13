@@ -10,3 +10,4 @@ docxtpl==0.20.2
 lxml==5.2.2
 pillow==12.2.0
 python-dotenv==1.2.2
+pywin32==312; sys_platform == "win32"

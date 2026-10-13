@@ -3,6 +3,11 @@ import {useLocation, useNavigate, useParams} from "react-router-dom";
 import api from "../shared/api.jsx";
 import {getApiErrorMessage} from "../shared/errorHandler.jsx";
 import {validateProtocolNumericRanges} from "../Features/ProtocolInspection/numericRangeValidation.js";
+import {
+    normalizeProtocolTextField,
+    validateProtocolTextFields,
+} from "../Features/ProtocolInspection/protocolTextValidation.js";
+import {calculateMeasuredSpeedKmh} from "../Features/ProtocolInspection/speedCalculations.js";
 
 import Box from "@mui/material/Box";
 import Button from "@mui/material/Button";
@@ -884,6 +889,16 @@ function mapProtocolToForm(data) {
     const testConditionsDashFields = testConditions.dash_fields || [];
     const roadConditionsDashFields = roadConditions.dash_fields || [];
     const powerSupplyDashFields = powerSupply.dash_fields || [];
+    const tireMarkingFront = normalizeProtocolTextField(
+        "tire_marking_front",
+        toFormValue(protocol.wheel_marking_front, protocolDashFields, "wheel_marking_front"),
+    );
+    const savedTireMarkingRear = normalizeProtocolTextField(
+        "tire_marking_rear",
+        toFormValue(protocol.wheel_marking_rear, protocolDashFields, "wheel_marking_rear"),
+    );
+    const fogLightSharedDistance = light.fog_light_left_distance_mm ?? light.fog_light_right_distance_mm;
+    const brakeSignalSharedDistance = light.brake_signal_left_distance_mm ?? light.brake_signal_right_distance_mm;
 
     return {
         ...initialForm,
@@ -922,12 +937,12 @@ function mapProtocolToForm(data) {
 
         brand_name: toFormValue(protocol.brand_name, protocolDashFields, "brand_name"),
         commercial_name: toFormValue(protocol.commercial_name, protocolDashFields, "commercial_name"),
-        vin: toFormValue(protocol.vin, protocolDashFields, "vin"),
+        vin: normalizeProtocolTextField("vin", toFormValue(protocol.vin, protocolDashFields, "vin")),
         category: toFormValue(protocol.vehicle_category, protocolDashFields, "vehicle_category"),
         body_type: toFormValue(protocol.body_type, protocolDashFields, "body_type"),
         mileage_km: toFormValue(measurement.mileage_km, measurementDashFields, "mileage_km"),
-        tire_marking_front: toFormValue(protocol.wheel_marking_front, protocolDashFields, "wheel_marking_front"),
-        tire_marking_rear: toFormValue(protocol.wheel_marking_rear, protocolDashFields, "wheel_marking_rear"),
+        tire_marking_front: tireMarkingFront,
+        tire_marking_rear: savedTireMarkingRear || tireMarkingFront,
         tire_season: toFormValue(protocol.tire_season, protocolDashFields, "tire_season"),
         tire_spikes_present: booleanToSelect(protocol.has_spikes),
         manufacture_year: toFormValue(protocol.manufacture_year, protocolDashFields, "manufacture_year"),
@@ -1011,17 +1026,21 @@ function mapProtocolToForm(data) {
         low_beam_lower_point_mm: toFormValue(light.low_beam_lower_point_mm, lightDashFields, "low_beam_lower_point_mm"),
         fog_light_upper_point_mm: toFormValue(light.fog_light_upper_point_mm, lightDashFields, "fog_light_upper_point_mm"),
         fog_light_lower_point_mm: toFormValue(light.fog_light_lower_point_mm, lightDashFields, "fog_light_lower_point_mm"),
-        fog_light_left_distance_mm: toFormValue(light.fog_light_left_distance_mm, lightDashFields, "fog_light_left_distance_mm"),
-        fog_light_right_distance_mm: toFormValue(light.fog_light_right_distance_mm, lightDashFields, "fog_light_right_distance_mm"),
+        fog_light_left_distance_mm: toFormValue(fogLightSharedDistance, lightDashFields, "fog_light_left_distance_mm"),
+        fog_light_right_distance_mm: toFormValue(fogLightSharedDistance, lightDashFields, "fog_light_left_distance_mm"),
         brake_signal_upper_point_mm: toFormValue(light.brake_signal_upper_point_mm, lightDashFields, "brake_signal_upper_point_mm"),
         brake_signal_lower_point_mm: toFormValue(light.brake_signal_lower_point_mm, lightDashFields, "brake_signal_lower_point_mm"),
-        brake_signal_left_distance_mm: toFormValue(light.brake_signal_left_distance_mm, lightDashFields, "brake_signal_left_distance_mm"),
-        brake_signal_right_distance_mm: toFormValue(light.brake_signal_right_distance_mm, lightDashFields, "brake_signal_right_distance_mm"),
+        brake_signal_left_distance_mm: toFormValue(brakeSignalSharedDistance, lightDashFields, "brake_signal_left_distance_mm"),
+        brake_signal_right_distance_mm: toFormValue(brakeSignalSharedDistance, lightDashFields, "brake_signal_left_distance_mm"),
         additional_brake_signal_from_glass_edge_mm: toFormValue(light.additional_brake_signal_from_glass_edge_mm, lightDashFields, "additional_brake_signal_from_glass_edge_mm"),
         additional_brake_signal_from_support_surface_mm: toFormValue(light.additional_brake_signal_from_support_surface_mm, lightDashFields, "additional_brake_signal_from_support_surface_mm"),
         additional_brake_signal_optical_center_shift_mm: toFormValue(light.additional_brake_signal_optical_center_shift_mm, lightDashFields, "additional_brake_signal_optical_center_shift_mm"),
-        rear_fog_upper_point_mm: toFormValue(light.rear_fog_upper_point_mm, lightDashFields, "rear_fog_upper_point_mm"),
-        rear_fog_lower_point_mm: toFormValue(light.rear_fog_lower_point_mm, lightDashFields, "rear_fog_lower_point_mm"),
+        rear_fog_upper_point_mm: Number(light.rear_fog_count) > 0
+            ? toFormValue(light.rear_fog_upper_point_mm, lightDashFields, "rear_fog_upper_point_mm")
+            : "",
+        rear_fog_lower_point_mm: Number(light.rear_fog_count) > 0
+            ? toFormValue(light.rear_fog_lower_point_mm, lightDashFields, "rear_fog_lower_point_mm")
+            : "",
 
         spare_wheel_present: booleanToSelect(measurement.spare_wheel_present),
         steering_lock_present: booleanToSelect(measurement.steering_lock_present),
@@ -1044,7 +1063,7 @@ function mapProtocolToForm(data) {
         glass_transparency_windshield_pct: toFormValue(measurement.glass_transparency_windshield_pct, measurementDashFields, "glass_transparency_windshield_pct"),
         sun_strip_width_mm: toFormValue(measurement.sun_strip_width_mm, measurementDashFields, "sun_strip_width_mm"),
         speed_by_speedometer_kmh: toFormValue(measurement.speed_by_speedometer_kmh, measurementDashFields, "speed_by_speedometer_kmh"),
-        actual_speed_kmh: toFormValue(measurement.actual_speed_kmh, measurementDashFields, "actual_speed_kmh"),
+        actual_speed_kmh: calculateMeasuredSpeedKmh(measurement.speed_by_speedometer_kmh),
         exhaust_noise_constant_db: toFormValue(measurement.exhaust_noise_constant_db, measurementDashFields, "exhaust_noise_constant_db"),
         exhaust_noise_deceleration_db: toFormValue(measurement.exhaust_noise_deceleration_db, measurementDashFields, "exhaust_noise_deceleration_db"),
         co_min_pct: toFormValue(measurement.co_min_pct, measurementDashFields, "co_min_pct"),
@@ -1079,12 +1098,12 @@ function buildProtocolPayload(form) {
 
         brand_name: emptyToNull(form.brand_name),
         commercial_name: emptyToNull(form.commercial_name),
-        vin: emptyToNull(form.vin),
+        vin: emptyToNull(normalizeProtocolTextField("vin", form.vin)),
         vehicle_category: emptyToNull(form.category),
         body_type: emptyToNull(form.body_type),
         supercharger: emptyToNull(form.supercharger),
-        wheel_marking_front: emptyToNull(form.tire_marking_front),
-        wheel_marking_rear: emptyToNull(form.tire_marking_rear),
+        wheel_marking_front: emptyToNull(normalizeProtocolTextField("tire_marking_front", form.tire_marking_front)),
+        wheel_marking_rear: emptyToNull(normalizeProtocolTextField("tire_marking_rear", form.tire_marking_rear)),
         tire_season: emptyToNull(form.tire_season),
         has_spikes: stringToBooleanOrNull(form.tire_spikes_present),
         manufacture_year: emptyToNull(form.manufacture_year),
@@ -1171,7 +1190,7 @@ function buildMeasurementPayload(form, dromMassKg = form.vehicle_weight_kg) {
         sun_strip_width_mm: emptyToNull(form.sun_strip_width_mm),
 
         speed_by_speedometer_kmh: emptyToNull(form.speed_by_speedometer_kmh),
-        actual_speed_kmh: emptyToNull(form.actual_speed_kmh),
+        actual_speed_kmh: emptyToNull(calculateMeasuredSpeedKmh(form.speed_by_speedometer_kmh)),
 
         exhaust_noise_constant_db: emptyToNull(form.exhaust_noise_constant_db),
         exhaust_noise_deceleration_db: emptyToNull(form.exhaust_noise_deceleration_db),
@@ -1297,12 +1316,12 @@ function buildLightPayload(form) {
         fog_light_upper_point_mm: emptyToNull(form.fog_light_upper_point_mm),
         fog_light_lower_point_mm: emptyToNull(form.fog_light_lower_point_mm),
         fog_light_left_distance_mm: emptyToNull(form.fog_light_left_distance_mm),
-        fog_light_right_distance_mm: emptyToNull(form.fog_light_right_distance_mm),
+        fog_light_right_distance_mm: emptyToNull(form.fog_light_left_distance_mm),
 
         brake_signal_upper_point_mm: emptyToNull(form.brake_signal_upper_point_mm),
         brake_signal_lower_point_mm: emptyToNull(form.brake_signal_lower_point_mm),
         brake_signal_left_distance_mm: emptyToNull(form.brake_signal_left_distance_mm),
-        brake_signal_right_distance_mm: emptyToNull(form.brake_signal_right_distance_mm),
+        brake_signal_right_distance_mm: emptyToNull(form.brake_signal_left_distance_mm),
 
         additional_brake_signal_from_glass_edge_mm: emptyToNull(form.additional_brake_signal_from_glass_edge_mm),
         additional_brake_signal_from_support_surface_mm: emptyToNull(form.additional_brake_signal_from_support_surface_mm),
@@ -1452,11 +1471,38 @@ function ProtocolInspection({measurementMode = false}) {
             return;
         }
 
+        const normalizedValue = normalizeProtocolTextField(name, value);
         setForm((prev) => ({
             ...prev,
-            [name]: value,
+            [name]: normalizedValue,
+            ...(name === "front_fog_count" && !(Number(value) > 0)
+                ? {
+                    fog_light_upper_point_mm: "",
+                    fog_light_lower_point_mm: "",
+                    fog_light_left_distance_mm: "",
+                    fog_light_right_distance_mm: "",
+                }
+                : {}),
+            ...(name === "rear_fog_count" && !(Number(value) > 0)
+                ? {
+                    rear_fog_upper_point_mm: "",
+                    rear_fog_lower_point_mm: "",
+                }
+                : {}),
+            ...(name === "tire_marking_front"
+                ? {tire_marking_rear: normalizedValue}
+                : {}),
             ...(name === "turn_signal_frequency_hz"
                 ? {turn_signal_frequency_per_min: value ? String(Number(value) * 60) : ""}
+                : {}),
+            ...(name === "speed_by_speedometer_kmh"
+                ? {actual_speed_kmh: calculateMeasuredSpeedKmh(value)}
+                : {}),
+            ...(name === "fog_light_left_distance_mm"
+                ? {fog_light_right_distance_mm: value}
+                : {}),
+            ...(name === "brake_signal_left_distance_mm"
+                ? {brake_signal_right_distance_mm: value}
                 : {}),
         }));
     };
@@ -1531,7 +1577,6 @@ function ProtocolInspection({measurementMode = false}) {
                 mappedForm.protocol_number &&
                 mappedForm.appendix_number !== mappedForm.protocol_number
             );
-
             setForm(mappedForm);
             setPhotos(data.photos || []);
         } catch (error) {
@@ -1713,8 +1758,9 @@ function ProtocolInspection({measurementMode = false}) {
             }
 
             const numericErrors = validateProtocolNumericRanges(activeForm);
+            const textErrors = validateProtocolTextFields(activeForm);
             const brakeMetricErrors = validateBrakeMetrics(activeForm, dromMassKg);
-            const validationErrors = [...numericErrors, ...brakeMetricErrors];
+            const validationErrors = [...numericErrors, ...textErrors, ...brakeMetricErrors];
             if (validationErrors.length) {
                 setErrorMessage(
                     ["Исправьте значения:", ...validationErrors.map(({message}) => message)].join("\n"),
@@ -2135,10 +2181,26 @@ function ProtocolInspection({measurementMode = false}) {
             const sourceValue = selectedSource === "measured" ? row.measured : row.catalog;
             if (sourceValue === null || sourceValue === undefined || sourceValue === "") return;
 
-            const normalizedValue = normalizeCatalogReviewValue(row.key, sourceValue);
+            const normalizedValue = normalizeProtocolTextField(
+                row.formField,
+                normalizeCatalogReviewValue(row.key, sourceValue),
+            );
             nextForm[row.formField] = normalizedValue;
             selectedValues[row.key] = normalizedValue;
         });
+
+        if (
+            "front_tires" in selectedValues
+            && !("rear_tires" in selectedValues)
+        ) {
+            nextForm.tire_marking_rear = nextForm.tire_marking_front;
+        }
+
+        const textErrors = validateProtocolTextFields(nextForm);
+        if (textErrors.length) {
+            setErrorMessage(textErrors.map(({message}) => message).join("\n"));
+            return;
+        }
 
         setForm(nextForm);
         setSaving(true);

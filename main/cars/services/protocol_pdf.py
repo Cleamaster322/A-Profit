@@ -84,7 +84,5 @@ def convert_docx_to_pdf(docx_path):
         raise RuntimeError(f"LibreOffice не смог создать PDF. {details}")
 
     return temp_dir, pdf_path
-
-
 def cleanup_pdf_preview(temp_dir):
     shutil.rmtree(temp_dir, ignore_errors=True)

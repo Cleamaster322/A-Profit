@@ -41,53 +41,48 @@ function ProtocolInspectionLightsGeometry({
                 })}
             </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Установка ПТФ по высоте
-            </Typography>
+            {Number(form.front_fog_count) > 0 && (
+                <>
+                    <Typography variant="h6" sx={subsectionTitleSx}>
+                        Установка ПТФ по высоте
+                    </Typography>
 
-            <Grid container spacing={2} sx={{mb: 3}}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Верхняя точка, мм",
-                    name: "fog_light_upper_point_mm",
-                    md: 6,
-                })}
+                    <Grid container spacing={2} sx={{mb: 3}}>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Верхняя точка, мм",
+                            name: "fog_light_upper_point_mm",
+                            md: 6,
+                        })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Нижняя точка, мм",
-                    name: "fog_light_lower_point_mm",
-                    md: 6,
-                })}
-            </Grid>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Нижняя точка, мм",
+                            name: "fog_light_lower_point_mm",
+                            md: 6,
+                        })}
+                    </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Установка ПТФ по ширине
-            </Typography>
+                    <Typography variant="h6" sx={subsectionTitleSx}>
+                        Установка ПТФ по ширине
+                    </Typography>
 
-            <Grid container spacing={2} sx={{mb: 3}}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Левая, мм",
-                    name: "fog_light_left_distance_mm",
-                    md: 6,
-                })}
-
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Правая, мм",
-                    name: "fog_light_right_distance_mm",
-                    md: 6,
-                })}
-            </Grid>
+                    <Grid container spacing={2} sx={{mb: 3}}>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Левая и правая, мм",
+                            name: "fog_light_left_distance_mm",
+                            md: 12,
+                        })}
+                    </Grid>
+                </>
+            )}
 
             <Typography variant="h6" sx={subsectionTitleSx}>
                 Установка основных сигналов торможения по высоте
@@ -122,18 +117,9 @@ function ProtocolInspectionLightsGeometry({
                     form,
                     handleChange,
                     textFieldSx,
-                    label: "Левая, мм",
+                    label: "Левая и правая, мм",
                     name: "brake_signal_left_distance_mm",
-                    md: 6,
-                })}
-
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Правая, мм",
-                    name: "brake_signal_right_distance_mm",
-                    md: 6,
+                    md: 12,
                 })}
             </Grid>
 
@@ -170,29 +156,33 @@ function ProtocolInspectionLightsGeometry({
                 })}
             </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Установка задних ПТФ по высоте
-            </Typography>
+            {Number(form.rear_fog_count) > 0 && (
+                <>
+                    <Typography variant="h6" sx={subsectionTitleSx}>
+                        Установка задних ПТФ по высоте
+                    </Typography>
 
-            <Grid container spacing={2}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Верхняя точка, мм",
-                    name: "rear_fog_upper_point_mm",
-                    md: 6,
-                })}
+                    <Grid container spacing={2}>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Верхняя точка, мм",
+                            name: "rear_fog_upper_point_mm",
+                            md: 6,
+                        })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Нижняя точка, мм",
-                    name: "rear_fog_lower_point_mm",
-                    md: 6,
-                })}
-            </Grid>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Нижняя точка, мм",
+                            name: "rear_fog_lower_point_mm",
+                            md: 6,
+                        })}
+                    </Grid>
+                </>
+            )}
         </Paper>
     );
 }

@@ -1,3 +1,4 @@
+from decimal import Decimal, ROUND_HALF_UP
 from uuid import uuid4
 
 from rest_framework import serializers
@@ -539,22 +540,16 @@ class ProtocolMeasurementSerializer(
                 "axle1_load_kg": "Суммарная нагрузка на оси не может превышать массу Drom."
             })
 
-        actual_speed = attrs.get(
-            "actual_speed_kmh",
-            getattr(self.instance, "actual_speed_kmh", None),
-        )
         speedometer_speed = attrs.get(
             "speed_by_speedometer_kmh",
             getattr(self.instance, "speed_by_speedometer_kmh", None),
         )
-        if (
-            actual_speed is not None
-            and speedometer_speed is not None
-            and actual_speed >= speedometer_speed
-        ):
-            raise serializers.ValidationError({
-                "actual_speed_kmh": "Фактическая скорость должна быть меньше скорости по спидометру."
-            })
+        if speedometer_speed is None:
+            attrs["actual_speed_kmh"] = None
+        else:
+            attrs["actual_speed_kmh"] = (
+                Decimal(str(speedometer_speed)) * Decimal("0.95")
+            ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
         return attrs
 
     class Meta:
