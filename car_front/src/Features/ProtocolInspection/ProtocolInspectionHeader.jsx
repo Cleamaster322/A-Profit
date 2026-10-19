@@ -21,7 +21,6 @@ const HEADER_DOCUMENT_OPTIONS = [
   {value: "bill_of_lading", label: "Коносамент"},
   {value: "kuts", label: "КУТС"},
   {value: "vehicle_manual", label: "Руководство по эксплуатации ТС"},
-  {value: "sampling_data_disclaimer", label: "ИЛ не несет ответственность за данные отбора образца."},
 ];
 
 function stripProtocolNumber(value) {
