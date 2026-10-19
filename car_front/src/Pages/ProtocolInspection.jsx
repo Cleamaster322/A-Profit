@@ -25,6 +25,12 @@ import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolIns
 import {calculateBrakeMetrics, validateBrakeMetrics} from "../Features/ProtocolInspection/brakeCalculations.js";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
 import ProtocolInspectionPhotos from "../Features/ProtocolInspection/ProtocolInspectionPhotos.jsx";
+import {
+    applyProtocolDraft,
+    clearProtocolDraft,
+    readProtocolDraft,
+    saveProtocolDraft,
+} from "../Features/ProtocolInspection/protocolDraft.js";
 import ProtocolInspectionVehicle from "../Features/ProtocolInspection/ProtocolInspectionVehicle.jsx";
 import ProtocolInspectionEngine from "../Features/ProtocolInspection/ProtocolInspectionEngine.jsx";
 import ProtocolInspectionSteeringTransmission
@@ -1350,6 +1356,13 @@ function ProtocolInspection({measurementMode = false}) {
     const protocolLockActiveRef = useRef(false);
     const appendixManuallyEditedRef = useRef(false);
 
+    const serverFormRef = useRef(null);   // последняя форма, пришедшая с сервера
+    const draftReadyRef = useRef(false);  // true только после успешной загрузки
+    const formRef = useRef(form);
+    formRef.current = form;
+
+    const [draftNotice, setDraftNotice] = useState(null);
+
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [successMessage, setSuccessMessage] = useState("");
@@ -1548,7 +1561,7 @@ function ProtocolInspection({measurementMode = false}) {
         protocolId = currentProtocolId,
         options = {}
     ) => {
-        const {startEditing = false} = options;
+        const {startEditing = false, restoreDraft = false} = options;
 
         if (!protocolId) return;
 
@@ -1572,13 +1585,33 @@ function ProtocolInspection({measurementMode = false}) {
                 mappedForm.appendix_number = mappedForm.protocol_number;
             }
 
+            let nextForm = mappedForm;
+
+            if (restoreDraft) {
+                const draft = readProtocolDraft(protocolId);
+
+                if (draft) {
+                    const restored = applyProtocolDraft(mappedForm, draft);
+
+                    if (restored.count > 0) {
+                        nextForm = restored.form;
+                        setDraftNotice({count: restored.count, savedAt: draft.savedAt});
+                    } else {
+                        clearProtocolDraft(protocolId);
+                    }
+                }
+            }
+
+            serverFormRef.current = mappedForm;
+
             appendixManuallyEditedRef.current = Boolean(
-                mappedForm.appendix_number &&
-                mappedForm.protocol_number &&
-                mappedForm.appendix_number !== mappedForm.protocol_number
+                nextForm.appendix_number &&
+                nextForm.protocol_number &&
+                nextForm.appendix_number !== nextForm.protocol_number
             );
-            setForm(mappedForm);
+            setForm(nextForm);
             setPhotos(data.photos || []);
+            draftReadyRef.current = true;
         } catch (error) {
             console.error("Ошибка загрузки протокола:", error);
 
@@ -1625,9 +1658,50 @@ function ProtocolInspection({measurementMode = false}) {
         }
     }, [currentProtocolId, loadProtocol]);
 
+    const persistDraft = useCallback(() => {
+        if (!currentProtocolId || !draftReadyRef.current || !serverFormRef.current) {
+            return;
+        }
+
+        if (["approved", "cancelled"].includes(formRef.current.status)) {
+            clearProtocolDraft(currentProtocolId);
+            return;
+        }
+
+        saveProtocolDraft(currentProtocolId, serverFormRef.current, formRef.current);
+    }, [currentProtocolId]);
+
+    // запись черновика с задержкой при вводе
+    useEffect(() => {
+        if (!draftReadyRef.current) {
+            return;
+        }
+
+        const timer = setTimeout(persistDraft, 400);
+        return () => clearTimeout(timer);
+    }, [form, persistDraft]);
+
+    // мгновенная запись при уходе со страницы (камера, смена вкладки)
+    useEffect(() => {
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === "hidden") {
+                persistDraft();
+            }
+        };
+
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        window.addEventListener("pagehide", persistDraft);
+
+        return () => {
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
+            window.removeEventListener("pagehide", persistDraft);
+        };
+    }, [persistDraft]);
+
     useEffect(() => {
         if (id) {
-            loadProtocol(id, {startEditing: true});
+            draftReadyRef.current = false;
+            loadProtocol(id, {startEditing: true, restoreDraft: true});
         } else {
             setErrorMessage("Не передан ID протокола");
         }
@@ -1855,6 +1929,9 @@ function ProtocolInspection({measurementMode = false}) {
             }
 
             await loadProtocol(protocolId);
+
+            clearProtocolDraft(protocolId);
+            setDraftNotice(null);
 
             if (showSuccessMessage) {
                 setSuccessMessage("Протокол успешно сохранён");
@@ -2637,6 +2714,18 @@ function ProtocolInspection({measurementMode = false}) {
                             }}
                         >
                             Загрузка данных...
+                        </Alert>
+                    )}
+
+                    {draftNotice && (
+                        <Alert
+                            severity="warning"
+                            onClose={() => setDraftNotice(null)}
+                            sx={{mb: 2, borderRadius: 0}}
+                        >
+                            Восстановлены несохранённые изменения (полей: {draftNotice.count}),
+                            записанные в {new Date(draftNotice.savedAt).toLocaleTimeString("ru-RU", {hour: "2-digit", minute: "2-digit"})}.
+                            Проверьте данные и нажмите «Сохранить».
                         </Alert>
                     )}
 
