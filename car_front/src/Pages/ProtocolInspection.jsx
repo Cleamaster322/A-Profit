@@ -1520,41 +1520,11 @@ function ProtocolInspection({measurementMode = false}) {
         }));
     };
 
-    const releaseProtocolLockOnUnload = useCallback(() => {
-        if (!currentProtocolId) {
-            return;
-        }
-
-        if (!protocolLockActiveRef.current) {
-            return;
-        }
-
-        if (["approved", "cancelled"].includes(formStatusRef.current)) {
-            return;
-        }
-
-        protocolLockActiveRef.current = false;
-
-        const accessToken = localStorage.getItem("accessToken");
-        const baseUrl = api.client.defaults.baseURL || "";
-        const csrfToken = api.client.defaults.headers.common["X-CSRFToken"];
-
-        try {
-            fetch(`${baseUrl}/cars/protocols/${currentProtocolId}/return-to-draft/`, {
-                method: "POST",
-                keepalive: true,
-                credentials: "include",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-Requested-With": "XMLHttpRequest",
-                    ...(csrfToken ? {"X-CSRFToken": csrfToken} : {}),
-                    ...(accessToken ? {Authorization: `Bearer ${accessToken}`} : {}),
-                },
-                body: JSON.stringify({}),
-            });
-        } catch (error) {
-            console.error("Ошибка отправки keepalive-запроса при закрытии вкладки:", error);
-        }
+    // Повторно занять протокол (для загрузки фото, если блокировка потерялась).
+    // start-editing для того же пользователя безопасен: он только продлевает блокировку.
+    const restoreProtocolLock = useCallback(async () => {
+        await api.post(`/cars/protocols/${currentProtocolId}/start-editing/`);
+        protocolLockActiveRef.current = true;
     }, [currentProtocolId]);
 
     const loadProtocol = useCallback(async (
@@ -1762,24 +1732,6 @@ function ProtocolInspection({measurementMode = false}) {
             });
         };
     }, [currentProtocolId, releaseProtocolLock]);
-
-    useEffect(() => {
-        const handlePageHide = () => {
-            releaseProtocolLockOnUnload();
-        };
-
-        const handleBeforeUnload = () => {
-            releaseProtocolLockOnUnload();
-        };
-
-        window.addEventListener("pagehide", handlePageHide);
-        window.addEventListener("beforeunload", handleBeforeUnload);
-
-        return () => {
-            window.removeEventListener("pagehide", handlePageHide);
-            window.removeEventListener("beforeunload", handleBeforeUnload);
-        };
-    }, [currentProtocolId, releaseProtocolLockOnUnload]);
 
     useEffect(() => {
         if (!currentProtocolId) {
@@ -2809,6 +2761,7 @@ function ProtocolInspection({measurementMode = false}) {
                         protocolId={currentProtocolId}
                         photos={photos}
                         setPhotos={setPhotos}
+                        onRestoreLock={restoreProtocolLock}
                     />
 
                     <Box ref={vehicleRef}>

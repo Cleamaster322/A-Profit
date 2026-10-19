@@ -50,6 +50,7 @@ function ProtocolInspectionPhotos({
     protocolId,
     photos = [],
     setPhotos,
+    onRestoreLock,
     sectionPaperSx,
     sectionTitleSx,
     subsectionTitleSx,
@@ -99,6 +100,23 @@ function ProtocolInspectionPhotos({
         );
     };
 
+    // Загрузка с одним повтором: если сервер ответил 403 (блокировка протокола
+    // потеряна, например после возврата из камеры), занимаем протокол заново
+    // и отправляем фото ещё раз.
+    const uploadWithLockRetry = async (file, photoType, sortOrder) => {
+        try {
+            return await uploadProtocolPhoto(protocolId, file, photoType, sortOrder);
+        } catch (err) {
+            if (err?.response?.status !== 403 || !onRestoreLock) {
+                throw err;
+            }
+
+            await onRestoreLock();
+
+            return await uploadProtocolPhoto(protocolId, file, photoType, sortOrder);
+        }
+    };
+
     const openInput = (input) => {
         if (!input) {
             return;
@@ -120,8 +138,7 @@ function ProtocolInspectionPhotos({
             setError("");
             setUploadingType(slot.type);
 
-            const uploadedPhoto = await uploadProtocolPhoto(
-                protocolId,
+            const uploadedPhoto = await uploadWithLockRetry(
                 file,
                 slot.type,
                 slot.sortOrder
@@ -156,8 +173,7 @@ function ProtocolInspectionPhotos({
             const uploadedPhotos = [];
 
             for (const file of files) {
-                const uploadedPhoto = await uploadProtocolPhoto(
-                    protocolId,
+                const uploadedPhoto = await uploadWithLockRetry(
                     file,
                     "other",
                     10

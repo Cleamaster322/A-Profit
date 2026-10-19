@@ -303,7 +303,7 @@ def release_expired_protocol_locks():
 
 def normalize_region_name(region):
     if not region:
-        return 'Не указано'
+        return ''
 
     mapping = {
         'japan': 'Япония',
@@ -1468,7 +1468,7 @@ def create_protocol(request):
             data['protocol_date'] = str(date.today())
 
         if not data.get('owner_name'):
-            data['owner_name'] = 'Не указано'
+            data['owner_name'] = ''
 
         if not data.get('owner_type'):
             data['owner_type'] = 'individual'
