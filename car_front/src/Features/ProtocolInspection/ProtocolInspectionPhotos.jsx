@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
@@ -16,6 +16,11 @@ import {
     deleteProtocolPhoto,
     uploadProtocolPhoto,
 } from "../../shared/protocolPhotoApi";
+import {
+    clearPhotoCaptureMarker,
+    readPhotoCaptureMarker,
+    savePhotoCaptureMarker,
+} from "./photoCaptureMarker";
 
 const DOCX_PHOTO_SLOTS = [
     {
@@ -58,7 +63,9 @@ function ProtocolInspectionPhotos({
     const [uploadingType, setUploadingType] = useState(null);
     const [deletingId, setDeletingId] = useState(null);
     const [error, setError] = useState("");
+    const [lostCapture, setLostCapture] = useState(null);
 
+    const sectionRef = useRef(null);
     const mainFileInputRefs = useRef({});
     const mainCameraInputRefs = useRef({});
     const additionalFileInputRef = useRef(null);
@@ -117,6 +124,42 @@ function ProtocolInspectionPhotos({
         }
     };
 
+    // Отметка дожила до загрузки страницы — значит, вкладку выгрузили,
+    // пока была открыта камера, и снимок потерян.
+    useEffect(() => {
+        if (!protocolId) {
+            return;
+        }
+
+        const marker = readPhotoCaptureMarker(protocolId);
+        clearPhotoCaptureMarker(protocolId);
+
+        if (marker) {
+            setLostCapture(marker);
+            sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+    }, [protocolId]);
+
+    // Страница пережила переход в камеру: снимок придёт через onChange
+    // (или пользователь отменил съёмку), отметка больше не нужна.
+    useEffect(() => {
+        if (!protocolId) {
+            return;
+        }
+
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === "visible") {
+                clearPhotoCaptureMarker(protocolId);
+            }
+        };
+
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+
+        return () => {
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
+        };
+    }, [protocolId]);
+
     const openInput = (input) => {
         if (!input) {
             return;
@@ -124,6 +167,12 @@ function ProtocolInspectionPhotos({
 
         input.value = "";
         input.click();
+    };
+
+    const openCamera = (input, slotLabel) => {
+        setLostCapture(null);
+        savePhotoCaptureMarker(protocolId, slotLabel);
+        openInput(input);
     };
 
     const handleMainPhotoUpload = async (event, slot) => {
@@ -211,10 +260,22 @@ function ProtocolInspectionPhotos({
     };
 
     return (
-        <Paper sx={sectionPaperSx}>
+        <Paper ref={sectionRef} sx={sectionPaperSx}>
             <Typography variant="h5" sx={sectionTitleSx}>
                 3. Фото автомобиля
             </Typography>
+
+            {lostCapture && (
+                <Alert
+                    severity="warning"
+                    onClose={() => setLostCapture(null)}
+                    sx={{ mb: 3, borderRadius: 0 }}
+                >
+                    Фото «{lostCapture.slotLabel}» не загружено: пока была открыта
+                    камера, браузер перезагрузил страницу. Сделайте фото ещё раз или
+                    сфотографируйте обычной камерой и нажмите «Загрузить».
+                </Alert>
+            )}
 
             {error && (
                 <Alert severity="error" sx={{ mb: 3, borderRadius: 0 }}>
@@ -337,7 +398,10 @@ function ProtocolInspectionPhotos({
                                         size="small"
                                         disabled={isUploading}
                                         onClick={() =>
-                                            openInput(mainCameraInputRefs.current[slot.type])
+                                            openCamera(
+                                                mainCameraInputRefs.current[slot.type],
+                                                slot.label
+                                            )
                                         }
                                     >
                                         Сделать фото
@@ -409,7 +473,9 @@ function ProtocolInspectionPhotos({
                 <Button
                     variant="outlined"
                     disabled={uploadingType === "other"}
-                    onClick={() => openInput(additionalCameraInputRef.current)}
+                    onClick={() =>
+                        openCamera(additionalCameraInputRef.current, "Дополнительное фото")
+                    }
                 >
                     Сделать дополнительное фото
                 </Button>
