@@ -98,7 +98,6 @@ function buildCreateProtocolPayload({
                                         configurationFilters,
                                     }) {
     const payload = {
-        owner_name: "Не указано",
         model: selectedModel?.id || null,
         brand_name: selectedBrand?.name || "",
         commercial_name: selectedModel?.name || "",

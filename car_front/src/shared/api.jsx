@@ -230,14 +230,10 @@ class ApiClient {
         return this.client.delete(url, config);
     }
 
-    generateProtocolDocx(protocolId) {
-        return this.client.post(
-            `/cars/protocols/${protocolId}/generate-docx/`,
-            {},
-            {
-                responseType: "blob",
-            }
-        );
+    // Протокол, заявка и техзапись в папку протокола.
+    // Ответ: {folder, files, skipped, errors}.
+    generateProtocolDocuments(protocolId) {
+        return this.client.post(`/cars/protocols/${protocolId}/generate-docx/`);
     }
 
     previewProtocolPdf(protocolId) {

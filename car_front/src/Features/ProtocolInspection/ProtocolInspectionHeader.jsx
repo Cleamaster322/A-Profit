@@ -194,6 +194,22 @@ function ProtocolInspectionHeader({
           fullWidth
           multiline
           minRows={2}
+          label="Юр. лицо"
+          name="owner_legal_entity"
+          value={form.owner_legal_entity || ""}
+          onChange={handleChange}
+          sx={textFieldSx}
+          slotProps={{
+            inputLabel: {
+              shrink: true,
+            },
+          }}
+        />
+
+        <TextField
+          fullWidth
+          multiline
+          minRows={2}
           label="Наименование и адрес изготовителя"
           name="manufacturer_info"
           value={form.manufacturer_info || ""}

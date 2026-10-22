@@ -242,6 +242,8 @@ For A.8.13.2, `applicable_8_13_2` is a legacy full-result value in the present-l
 {{ protocol_date }} -> {{ protocol_date }}
 {{ owner_full_name }} -> {{ owner_full_name }}
 {{ owner_address }} -> {{ owner_address }}
+{{ owner_legal_entity }} -> {{ owner_legal_entity }}
+{{ applicant_name }} -> {{ applicant_name }}
 {{ submitted_documents }} -> {{ submitted_documents }}
 {{ manufacturer_info }} -> {{ vehicle_manufacturer_info }}
 {{ brand_name }} -> {{ vehicle_brand_name }}
@@ -264,9 +266,6 @@ For A.8.13.2, `applicable_8_13_2` is a legacy full-result value in the present-l
 {{ phase_ab_voltage_v }} -> {{ power_supply_phase_ab_voltage_value }}
 {{ phase_bc_voltage_v }} -> {{ power_supply_phase_bc_voltage_value }}
 {{ phase_ac_voltage_v }} -> {{ power_supply_phase_ac_voltage_value }}
-{{ photo_gas_test }} -> {{ photo_gas_test }}
-{{ photo_noise_test }} -> {{ photo_noise_test }}
-{{ photo_stand_test }} -> {{ photo_stand_test }}
 ```
 
 ### Remaining measurement/calculation values

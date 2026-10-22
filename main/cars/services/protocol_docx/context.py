@@ -1,8 +1,7 @@
-from pathlib import Path
-
-from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 
+from ...photo_slots import PHOTO_SLOT_TITLES, slot_photos
+from ..protocol_storage import photo_absolute_path
 from .applicability import build_applicability_values
 from .calculations import (
     build_calculated_values,
@@ -1597,41 +1596,20 @@ def build_eco_values(protocol, measurement):
 # Фото
 # =========================
 
-def get_photo_path(protocol, photo_type):
-    photo = protocol.photos.filter(photo_type=photo_type).order_by("sort_order", "id").first()
-
-    if not photo or not photo.file_path:
-        return ""
-
-    raw_path = str(photo.file_path)
-
-    if raw_path.startswith("http://") or raw_path.startswith("https://"):
-        return ""
-
-    path = Path(raw_path)
-
-    if path.is_absolute() and path.exists():
-        return str(path)
-
-    media_path = Path(settings.MEDIA_ROOT) / raw_path
-
-    if media_path.exists():
-        return str(media_path)
-
-    base_path = Path(settings.BASE_DIR) / raw_path
-
-    if base_path.exists():
-        return str(base_path)
-
-    return ""
-
-
 def build_photo_values(protocol):
-    return {
-        "photo_stand_test": get_photo_path(protocol, "stand_test_photo"),
-        "photo_gas_test": get_photo_path(protocol, "gas_test_photo"),
-        "photo_noise_test": get_photo_path(protocol, "noise_test_photo"),
-    }
+    """
+    Фото для раздела «5. Фотоматериалы»: все загруженные фото схемы в её порядке,
+    подпись — название фото без номера. Фото без файла на диске пропускаются.
+    """
+    photos = []
+
+    for photo in slot_photos(protocol):
+        path = photo_absolute_path(photo, protocol)
+
+        if path is not None and path.is_file():
+            photos.append({"path": str(path), "title": PHOTO_SLOT_TITLES[photo.photo_type]})
+
+    return {"protocol_photos": photos}
 
 
 # =========================
@@ -1673,6 +1651,10 @@ def build_protocol_docx_context(protocol):
 
         "owner_address": fmt_text(protocol.owner_address),
         "owner_phone": fmt_text(protocol.owner_phone),
+        "owner_legal_entity": fmt_text(getattr(protocol, "owner_legal_entity", None)),
+        # Заявка, подпись «ФИО/Наименование юридического лица»: юр. лицо, если указано, иначе ФИО.
+        "applicant_name": fmt_text(getattr(protocol, "owner_legal_entity", None))
+        or fmt_text(build_owner_full_name(protocol)),
         "manufacturer_info": build_manufacturer_info(protocol),
         "submitted_documents": build_submitted_documents(protocol),
         "inspection_place": fmt_text(protocol.inspection_place, DEFAULT_INSPECTION_PLACE),
@@ -1717,7 +1699,12 @@ def build_protocol_docx_context(protocol):
         "wheel_marking_rear": fmt_text(protocol.wheel_marking_rear),
         "tire_season_label": label(TIRE_SEASON_LABELS, protocol.tire_season),
         "has_spikes_label": fmt_bool(protocol.has_spikes),
-        "manufacture_year": fmt_int(protocol.manufacture_year),
+        # Год выпуска — из даты, выбранной вместе с комплектацией; если её нет — из поля «Год выпуска».
+        "manufacture_year": (
+            str(protocol.manufacture_date.year)
+            if protocol.manufacture_date
+            else fmt_int(protocol.manufacture_year)
+        ),
         "color": fmt_text(protocol.color),
 
         # =========================

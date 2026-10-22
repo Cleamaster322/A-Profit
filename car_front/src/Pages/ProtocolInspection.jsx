@@ -25,6 +25,7 @@ import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolIns
 import {calculateBrakeMetrics, validateBrakeMetrics} from "../Features/ProtocolInspection/brakeCalculations.js";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
 import ProtocolInspectionPhotos from "../Features/ProtocolInspection/ProtocolInspectionPhotos.jsx";
+import {getProtocolPhotoSlots} from "../shared/protocolPhotoApi.jsx";
 import {
     applyProtocolDraft,
     clearProtocolDraft,
@@ -120,6 +121,7 @@ const initialForm = {
     revision_comment: "",
     owner_full_name: "",
     owner_address: "",
+    owner_legal_entity: "",
     manufacturer_info: "",
     header_document_selections: [],
 
@@ -490,6 +492,7 @@ const PROTOCOL_DASH_FIELDS = [
     {formField: "appendix_number", apiField: "appendix_number"},
     {formField: "owner_full_name", apiField: "owner_name"},
     {formField: "owner_address", apiField: "owner_address"},
+    {formField: "owner_legal_entity", apiField: "owner_legal_entity"},
     {formField: "manufacturer_info", apiField: "manufacturer_info"},
     {formField: "brand_name", apiField: "brand_name"},
     {formField: "commercial_name", apiField: "commercial_name"},
@@ -921,6 +924,7 @@ function mapProtocolToForm(data) {
 
         owner_full_name: toOwnerFullNameFormValue(protocol, protocolDashFields),
         owner_address: toFormValue(protocol.owner_address, protocolDashFields, "owner_address"),
+        owner_legal_entity: toFormValue(protocol.owner_legal_entity, protocolDashFields, "owner_legal_entity"),
         manufacturer_info: toFormValue(protocol.manufacturer_info, protocolDashFields, "manufacturer_info"),
         header_document_selections: Array.isArray(protocol.header_document_selections)
             ? protocol.header_document_selections
@@ -1099,6 +1103,7 @@ function buildProtocolPayload(form) {
         owner_first_name: null,
         owner_middle_name: null,
         owner_address: emptyToNull(form.owner_address) || "",
+        owner_legal_entity: emptyToNull(form.owner_legal_entity),
         manufacturer_info: emptyToNull(form.manufacturer_info),
         header_document_selections: form.header_document_selections || [],
 
@@ -1351,6 +1356,7 @@ function ProtocolInspection({measurementMode = false}) {
 
     const [form, setForm] = useState(initialForm);
     const [photos, setPhotos] = useState([]);
+    const [photoSlots, setPhotoSlots] = useState([]);
 
     const formStatusRef = useRef("");
     const protocolLockActiveRef = useRef(false);
@@ -1988,7 +1994,18 @@ function ProtocolInspection({measurementMode = false}) {
         }
     };
 
-    const handleGenerateDocx = async () => {
+    // Итог формирования: папка, собранные файлы и документы без шаблона.
+    const describeGeneratedDocuments = (data) => {
+        const parts = [`Документы сохранены в папку ${data.folder}: ${data.files.join(", ")}.`];
+
+        if (data.skipped?.length) {
+            parts.push(`Не сформированы: ${data.skipped.join("; ")}.`);
+        }
+
+        return parts.join(" ");
+    };
+
+    const handleGenerateDocuments = async () => {
         if (!currentProtocolId) {
             setErrorMessage("Сначала сохраните протокол");
             return;
@@ -2004,27 +2021,19 @@ function ProtocolInspection({measurementMode = false}) {
 
         try {
             setErrorMessage("");
-            setSuccessMessage("Данные сохранены, формируется DOCX...");
+            setSuccessMessage("Данные сохранены, формируются документы...");
 
-            const response = await api.generateProtocolDocx(currentProtocolId);
+            // Документы сохраняются только в папку протокола на сервере, в браузер не скачиваются.
+            const response = await api.generateProtocolDocuments(currentProtocolId);
 
-            const blob = new Blob([response.data], {
-                type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            });
-
-            const url = window.URL.createObjectURL(blob);
-            const link = document.createElement("a");
-            link.href = url;
-            link.download = `protocol_${currentProtocolId}.docx`;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-            window.URL.revokeObjectURL(url);
-
-            setSuccessMessage("DOCX сформирован");
+            setSuccessMessage(describeGeneratedDocuments(response.data));
         } catch (error) {
-            console.error("Ошибка генерации DOCX:", error);
-            setErrorMessage("Не удалось сформировать DOCX");
+            console.error("Ошибка формирования документов:", error);
+
+            // 409: часть файлов открыта в Word — остальные документы всё равно собраны.
+            const data = error.response?.data;
+            setSuccessMessage(data?.files?.length ? describeGeneratedDocuments(data) : "");
+            setErrorMessage(getApiErrorMessage(error, "Не удалось сформировать документы"));
         }
     };
 
@@ -2071,6 +2080,37 @@ function ProtocolInspection({measurementMode = false}) {
             );
         }
     };
+
+    useEffect(() => {
+        let cancelled = false;
+
+        getProtocolPhotoSlots()
+            .then((slots) => {
+                if (!cancelled) {
+                    setPhotoSlots(slots);
+                }
+            })
+            .catch((error) => {
+                console.error("Ошибка загрузки списка фото:", error);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
+
+    // Группа «Фотофиксация» после блока страницы (group — из photo_slots.py).
+    const renderPhotoGroup = (group) => (
+        <ProtocolInspectionPhotos
+            {...commonSectionProps}
+            protocolId={currentProtocolId}
+            group={group}
+            slots={photoSlots}
+            photos={photos}
+            setPhotos={setPhotos}
+            onRestoreLock={restoreProtocolLock}
+        />
+    );
 
     const commonSectionProps = {
         form,
@@ -2332,7 +2372,7 @@ function ProtocolInspection({measurementMode = false}) {
             {!measurementMode && <>
                 <Button
                     variant="outlined"
-                    onClick={handleGenerateDocx}
+                    onClick={handleGenerateDocuments}
                     disabled={!currentProtocolId || saving || loading}
                     sx={{
                         borderColor: "#5f6b2f",
@@ -2348,7 +2388,7 @@ function ProtocolInspection({measurementMode = false}) {
                         },
                     }}
                 >
-                    {saving ? "Сохранение..." : "Скачать DOCX"}
+                    {saving ? "Сохранение..." : "Сформировать"}
                 </Button>
             </>}
 
@@ -2756,13 +2796,7 @@ function ProtocolInspection({measurementMode = false}) {
                         <ProtocolInspectionConditions {...commonSectionProps} />
                     </Box>
 
-                    <ProtocolInspectionPhotos
-                        {...commonSectionProps}
-                        protocolId={currentProtocolId}
-                        photos={photos}
-                        setPhotos={setPhotos}
-                        onRestoreLock={restoreProtocolLock}
-                    />
+                    {renderPhotoGroup("after_conditions")}
 
                     <Box ref={vehicleRef}>
                         <BlockError message={blockErrors.vehicle}/>
@@ -2779,10 +2813,14 @@ function ProtocolInspection({measurementMode = false}) {
                         <ProtocolInspectionSteeringTransmission {...commonSectionProps} />
                     </Box>
 
+                    {renderPhotoGroup("after_steering_transmission")}
+
                     <Box ref={brakesRef}>
                         <BlockError message={blockErrors.brakes}/>
                         <ProtocolInspectionBrakes {...commonSectionProps} />
                     </Box>
+
+                    {renderPhotoGroup("after_brakes")}
 
                     <Box ref={lightsMainRef}>
                         <BlockError message={blockErrors.lightsMain}/>
@@ -2793,6 +2831,8 @@ function ProtocolInspection({measurementMode = false}) {
                         <BlockError message={blockErrors.lightsGeometry}/>
                         <ProtocolInspectionLightsGeometry {...commonSectionProps} />
                     </Box>
+
+                    {renderPhotoGroup("after_lights_geometry")}
 
                     <Box ref={miscRef}>
                         <BlockError message={blockErrors.misc}/>

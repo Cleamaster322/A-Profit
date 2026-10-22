@@ -2,6 +2,8 @@ from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from .photo_slots import PHOTO_TYPE_CHOICES
+
 # =========================
 # Общие mixin-классы
 # =========================
@@ -201,10 +203,21 @@ class Protocol(DashFieldsMixin, models.Model):
         ('winter', 'Зима'),
     ]
 
+    FILES_LOCATION_CHOICES = [
+        ('in_progress', 'В работе'),
+        ('completed', 'Завершённые'),
+    ]
+
     id = models.BigAutoField(primary_key=True)
     protocol_number = models.CharField(max_length=100, unique=True, null=True, blank=True)
     protocol_date = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='measurement')
+    # В какой корневой папке сейчас лежат файлы протокола (см. ProtocolStorageSettings).
+    files_location = models.CharField(
+        max_length=20,
+        choices=FILES_LOCATION_CHOICES,
+        default='in_progress',
+    )
     locked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -272,6 +285,8 @@ class Protocol(DashFieldsMixin, models.Model):
     owner_address = models.CharField(max_length=500, blank=True, null=True)
     owner_document = models.CharField(max_length=255, blank=True, null=True)
     owner_phone = models.CharField(max_length=50, blank=True, null=True)
+    # Юр. лицо заказчика (наименование, адреса) — свободный многострочный текст.
+    owner_legal_entity = models.TextField(blank=True, null=True)
 
     # Изготовитель
     manufacturer_info = models.TextField(blank=True, null=True)
@@ -684,20 +699,9 @@ class ProtocolLight(DashFieldsMixin, models.Model):
 # =========================
 
 class ProtocolPhoto(models.Model):
-    PHOTO_TYPE_CHOICES = [
-        ('front_view', 'Фото спереди'),
-        ('rear_view', 'Фото сзади'),
-        ('left_view', 'Фото слева'),
-        ('right_view', 'Фото справа'),
-        ('vin_photo', 'Фото VIN'),
-        ('nameplate_photo', 'Фото шильдика'),
-        ('tire_size_label_photo', 'Фото бирки размера колес'),
-        ('odometer_photo', 'Фото пробега'),
-        ('gas_test_photo', 'Фото испытаний: газы'),
-        ('noise_test_photo', 'Фото испытаний: шум'),
-        ('stand_test_photo', 'Фото испытаний: стенд'),
-        ('other', 'Другое'),
-    ]
+    # Слоты фотофиксации (cars/photo_slots.py). Старые записи с другими типами
+    # (например, «Другое») остаются в БД, но на сайте и в DOCX не показываются.
+    PHOTO_TYPE_CHOICES = PHOTO_TYPE_CHOICES
 
     id = models.BigAutoField(primary_key=True)
 
@@ -708,7 +712,7 @@ class ProtocolPhoto(models.Model):
         db_column='protocol_id'
     )
 
-    photo_type = models.CharField(max_length=50, choices=PHOTO_TYPE_CHOICES, default='other')
+    photo_type = models.CharField(max_length=50, choices=PHOTO_TYPE_CHOICES)
     file_path = models.CharField(max_length=500, blank=True, null=True)
     sort_order = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -787,3 +791,45 @@ class ProtocolPowerSupply(DashFieldsMixin, models.Model):
 
     class Meta:
         db_table = 'protocol_power_supply'
+
+
+# =========================
+# ProtocolStorageSettings
+# =========================
+
+class ProtocolStorageSettings(models.Model):
+    """
+    Папки для файлов протоколов (одна запись, задаётся в админке).
+
+    Пустой путь — используется папка по умолчанию внутри MEDIA_ROOT.
+    """
+    in_progress_dir = models.CharField(
+        'Папка «В работе»',
+        max_length=500,
+        blank=True,
+        help_text=r'Абсолютный путь, например D:\Протоколы\В работе или \\сервер\Протоколы\В работе. '
+                  'Пусто — media/protocols/in_progress.',
+    )
+    completed_dir = models.CharField(
+        'Папка «Завершённые»',
+        max_length=500,
+        blank=True,
+        help_text='Абсолютный путь. Пусто — media/protocols/completed.',
+    )
+
+    class Meta:
+        db_table = 'protocol_storage_settings'
+        verbose_name = 'Папки протоколов'
+        verbose_name_plural = 'Папки протоколов'
+
+    def __str__(self):
+        return 'Папки протоколов'
+
+    @classmethod
+    def load(cls):
+        return cls.objects.order_by('id').first() or cls()
+
+    def clean(self):
+        from .services.protocol_storage import validate_storage_dirs
+
+        validate_storage_dirs(self.in_progress_dir, self.completed_dir)

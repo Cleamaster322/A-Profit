@@ -5,11 +5,12 @@ const MARKER_TTL_MS = 15 * 60 * 1000; // старше 15 минут — уже �
 
 const markerKey = (protocolId) => `protocolPhotoCapture:${protocolId}`;
 
-export function savePhotoCaptureMarker(protocolId, slotLabel) {
+// group — группа «Фотофиксация», из которой открыли камеру: предупреждение покажет она.
+export function savePhotoCaptureMarker(protocolId, slotLabel, group) {
     try {
         localStorage.setItem(
             markerKey(protocolId),
-            JSON.stringify({slotLabel, startedAt: Date.now()}),
+            JSON.stringify({slotLabel, group, startedAt: Date.now()}),
         );
     } catch {
         // хранилище недоступно: без отметки просто не будет предупреждения

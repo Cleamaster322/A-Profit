@@ -1,5 +1,7 @@
 from datetime import date
 from decimal import Decimal
+from io import StringIO
+import os
 import re
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,9 +9,13 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from django.contrib.auth.models import Group, User
+from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.core.management import call_command
 from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from docx import Document
+from PIL import Image
 from rest_framework.test import APIClient
 
 from .models import (
@@ -22,6 +28,7 @@ from .models import (
 	ProtocolBrake,
 	ProtocolMeasurement,
 	ProtocolPhoto,
+	ProtocolStorageSettings,
 )
 from .serializers import (
 	ConfigurationSerializer,
@@ -45,8 +52,14 @@ from .services.protocol_docx.calculations import (
 	u_vehicle_height_mm,
 )
 from .services.protocol_docx_generator import generate_protocol_docx
+from .services.protocol_storage import (
+	photo_file_stem,
+	protocol_folder_name,
+	validate_storage_dirs,
+)
 from .services.protocol_docx.applicability import build_applicability_values
 from .services.protocol_docx.context import (
+	build_protocol_docx_context,
 	build_submitted_documents,
 	build_light_device_row_values,
 	build_dynamic_result_values,
@@ -606,7 +619,7 @@ class ProtocolWorkflowTests(TestCase):
 	def test_measurer_cannot_access_foreign_protocol_resources(self):
 		photo = ProtocolPhoto.objects.create(
 			protocol=self.protocol,
-			photo_type="other",
+			photo_type="odometer_photo",
 			file_path="e2e/foreign-photo.jpg",
 		)
 		self.authenticate(self.other_measurer)
@@ -636,11 +649,7 @@ class ProtocolWorkflowTests(TestCase):
 			403,
 		)
 		self.assertEqual(
-			self.client.patch(
-				f"/cars/protocol-photos/{photo.id}/update/",
-				{"sort_order": 99},
-				format="json",
-			).status_code,
+			self.client.get(f"/cars/protocol-photos/{photo.id}/file/").status_code,
 			403,
 		)
 		self.assertEqual(
@@ -678,6 +687,10 @@ class ProtocolWorkflowTests(TestCase):
 		self.assertEqual(self.protocol.owner_name, "Разрешенное изменение")
 
 
+def write_fake_docx(template_path, output_path, context):
+	Path(output_path).write_bytes(b"new")
+
+
 class ProtocolTemplateGenerationTests(SimpleTestCase):
 	def test_generator_uses_the_single_protocol_template(self):
 		protocol = SimpleNamespace(id=42)
@@ -685,11 +698,14 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 		with TemporaryDirectory() as media_root:
 			with override_settings(MEDIA_ROOT=media_root):
 				with patch(
+					"cars.services.protocol_docx_generator.protocol_document_path",
+					return_value=Path(media_root) / "00042" / "00042 Протокол.docx",
+				), patch(
 					"cars.services.protocol_docx_generator.build_protocol_docx_context",
 					return_value={"example": "value"},
 				), patch(
 					"cars.services.protocol_docx_generator.render_protocol_docx",
-					side_effect=lambda template_path, output_path, context: output_path,
+					side_effect=write_fake_docx,
 				) as render, patch(
 					"cars.services.protocol_docx_generator.add_protocol_placeholder_aliases"
 				) as add_aliases, patch(
@@ -698,7 +714,7 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 				) as count_pages:
 					output = generate_protocol_docx(protocol)
 
-		self.assertEqual(output.name, "protocol_42.docx")
+		self.assertEqual(output.name, "00042 Протокол.docx")
 		self.assertEqual(add_aliases.call_count, 1)
 		self.assertEqual(add_aliases.call_args.args[0]["example"], "value")
 		self.assertEqual(render.call_count, 2)
@@ -711,6 +727,49 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 			render.call_args.kwargs["context"],
 			{"example": "value", "protocol_page_count": "40"},
 		)
+
+	def render_template_with_photos(self, temp_dir, count):
+		photos = []
+		for index in range(count):
+			image_path = Path(temp_dir) / f"{index}.png"
+			Image.new("RGB", (40, 30), "red").save(image_path)
+			photos.append({"path": str(image_path), "title": f"Фото слота {index}"})
+
+		output_path = Path(temp_dir) / "output.docx"
+		template_path = Path(__file__).parent / "templates" / "protocol_template.docx"
+		render_protocol_docx(template_path, output_path, {"protocol_photos": photos})
+		return Document(output_path)
+
+	def test_photo_table_has_two_photos_per_row_with_captions(self):
+		with TemporaryDirectory() as temp_dir:
+			document = self.render_template_with_photos(temp_dir, 3)
+
+		photo_tables = [
+			table for table in document.tables
+			if any("Фото слота" in cell.text for row in table.rows for cell in row.cells)
+		]
+		self.assertEqual(len(photo_tables), 1)
+		rows = photo_tables[0].rows
+		self.assertEqual(len(rows), 4)
+		self.assertEqual(
+			[[cell.text for cell in row.cells] for row in rows[1::2]],
+			[["Фото слота 0", "Фото слота 1"], ["Фото слота 2", ""]],
+		)
+		self.assertEqual(
+			[len(cell._tc.xpath(".//w:drawing")) for row in rows[0::2] for cell in row.cells],
+			[1, 1, 1, 0],
+		)
+		self.assertNotIn("photo_image", document.element.xml)
+		self.assertNotIn("photo_caption", document.element.xml)
+
+	def test_photo_table_is_replaced_with_text_when_there_are_no_photos(self):
+		with TemporaryDirectory() as temp_dir:
+			document = self.render_template_with_photos(temp_dir, 0)
+
+		paragraphs = [paragraph.text for paragraph in document.paragraphs]
+		photos_heading = paragraphs.index("5. Фотоматериалы")
+		self.assertIn("Отсутствуют.", paragraphs[photos_heading:photos_heading + 4])
+		self.assertNotIn("photo_image", document.element.xml)
 
 	def test_protocol_page_count_placeholder_is_replaced_with_word_page_count(self):
 		with TemporaryDirectory() as temp_dir:
@@ -775,6 +834,433 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 			values["applicable_1_2_1"],
 			"не применяется (на ТС отсутствует государственный регистрационный знак)",
 		)
+
+
+class ProtocolFileStorageTests(TestCase):
+	def setUp(self):
+		temp_dir = TemporaryDirectory()
+		self.addCleanup(temp_dir.cleanup)
+		self.temp = Path(temp_dir.name)
+		self.media_root = self.temp / "media"
+		self.in_progress = self.temp / "in_progress"
+		self.completed = self.temp / "completed"
+
+		media_override = override_settings(MEDIA_ROOT=str(self.media_root))
+		media_override.enable()
+		self.addCleanup(media_override.disable)
+
+		ProtocolStorageSettings.objects.create(
+			in_progress_dir=str(self.in_progress),
+			completed_dir=str(self.completed),
+		)
+
+		self.client = APIClient()
+		self.measurer = User.objects.create_user(username="measurer", password="test-password")
+		self.measurer.groups.add(Group.objects.get_or_create(name="measurer")[0])
+		self.manager = User.objects.create_user(username="manager", password="test-password")
+		self.manager.groups.add(Group.objects.get_or_create(name="manager")[0])
+		self.superuser = User.objects.create_superuser(username="root", password="test-password")
+		self.protocol = Protocol.objects.create(
+			user=self.measurer,
+			protocol_number="00001",
+			status="measurement",
+			locked_by=self.measurer,
+			locked_at=timezone.now(),
+		)
+
+	def post(self, path, data=None):
+		return self.client.post(path, data or {}, format="json")
+
+	def make_protocol_file(self, root, name="photos/old.jpg", content=b"old"):
+		path = root / "00001" / name
+		path.parent.mkdir(parents=True, exist_ok=True)
+		path.write_bytes(content)
+		return path
+
+	def upload_photo(self, photo_type="odometer_photo", filename="camera.JPG", content=b"jpeg-bytes"):
+		self.client.force_authenticate(user=self.measurer)
+		return self.client.post(
+			f"/cars/protocols/{self.protocol.id}/photos/create/",
+			{
+				"photo_type": photo_type,
+				"file": SimpleUploadedFile(filename, content, content_type="image/jpeg"),
+			},
+			format="multipart",
+		)
+
+	def test_created_protocol_gets_folder_in_progress(self):
+		self.client.force_authenticate(user=self.measurer)
+		response = self.post("/cars/protocols/create/", {"owner_name": "Владелец"})
+
+		self.assertEqual(response.status_code, 201)
+		self.assertTrue((self.in_progress / response.data["protocol_number"]).is_dir())
+
+	def test_protocol_created_without_owner_name_keeps_it_empty(self):
+		self.client.force_authenticate(user=self.measurer)
+		response = self.post("/cars/protocols/create/", {"brand_name": "KIA"})
+
+		self.assertEqual(response.status_code, 201)
+		self.assertEqual(response.data["owner_name"], "")
+
+	def test_owner_legal_entity_is_saved_and_goes_to_docx_context(self):
+		legal_entity = "ООО «Ромашка»\nг. Владивосток, ул. Снеговая, 64"
+		self.client.force_authenticate(user=self.measurer)
+		response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"owner_legal_entity": legal_entity},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.owner_legal_entity, legal_entity)
+		self.assertEqual(build_protocol_docx_context(self.protocol)["owner_legal_entity"], legal_entity)
+
+	def test_uploaded_photo_goes_to_in_progress_folder_and_is_served(self):
+		response = self.upload_photo()
+
+		self.assertEqual(response.status_code, 201)
+		file_path = response.data["file_path"]
+		self.assertEqual(file_path, "00001/photos/Одометр.jpg")
+		self.assertEqual(response.data["caption"], "Одометр")
+		self.assertEqual((self.in_progress / file_path).read_bytes(), b"jpeg-bytes")
+		self.assertEqual(
+			response.data["file_url"],
+			f"/cars/protocol-photos/{response.data['id']}/file/",
+		)
+
+		file_response = self.client.get(response.data["file_url"])
+		self.assertEqual(file_response.status_code, 200)
+		self.assertEqual(file_response["Content-Type"], "image/jpeg")
+		self.assertEqual(b"".join(file_response.streaming_content), b"jpeg-bytes")
+		file_response.close()
+
+	def test_photo_file_is_protected_from_foreign_measurer(self):
+		photo_id = self.upload_photo().data["id"]
+		other = User.objects.create_user(username="other", password="test-password")
+		other.groups.add(Group.objects.get_or_create(name="measurer")[0])
+
+		self.client.force_authenticate(user=other)
+		self.assertEqual(self.client.get(f"/cars/protocol-photos/{photo_id}/file/").status_code, 403)
+
+		self.client.force_authenticate(user=None)
+		self.assertEqual(self.client.get(f"/cars/protocol-photos/{photo_id}/file/").status_code, 401)
+
+	def test_new_photo_replaces_slot_photo_and_its_file(self):
+		first = self.upload_photo("stand_test_photo", "a.png").data
+		second = self.upload_photo("stand_test_photo", "b.jpg", b"second").data
+		third = self.upload_photo("stand_test_photo", "c.jpg", b"third").data
+
+		self.assertEqual(first["file_path"], "00001/photos/Испытания на тормозном стенде.png")
+		self.assertFalse((self.in_progress / first["file_path"]).exists())
+		self.assertEqual(second["file_path"], third["file_path"])
+		self.assertEqual((self.in_progress / third["file_path"]).read_bytes(), b"third")
+		self.assertEqual(ProtocolPhoto.objects.filter(protocol=self.protocol).count(), 1)
+
+	def test_only_photo_slots_are_accepted_and_listed(self):
+		self.assertEqual(self.upload_photo("other").status_code, 400)
+		self.assertEqual(self.upload_photo("").status_code, 400)
+
+		ProtocolPhoto.objects.create(protocol=self.protocol, photo_type="other", file_path="x.jpg")
+		self.upload_photo("speed_photo")
+		self.upload_photo("acceptance_photo")
+
+		listed = self.client.get(f"/cars/protocols/{self.protocol.id}/photos/").data
+		self.assertEqual([photo["photo_type"] for photo in listed], ["acceptance_photo", "speed_photo"])
+
+		full = self.client.get(f"/cars/protocols/{self.protocol.id}/full/").data
+		self.assertEqual([photo["photo_type"] for photo in full["photos"]], ["acceptance_photo", "speed_photo"])
+
+	def test_photo_slots_follow_excel_scheme(self):
+		self.client.force_authenticate(user=self.measurer)
+		slots = self.client.get("/cars/protocol-photo-slots/").data
+
+		self.assertEqual(len(slots), 31)
+		self.assertEqual(slots[0], {
+			"photo_type": "acceptance_photo",
+			"title": "Приемка ТС",
+			"description": "Эксперт с открытым капотом ТС",
+			"group": "after_conditions",
+		})
+		groups = [slot["group"] for slot in slots]
+		self.assertEqual(
+			[groups.count(group) for group in (
+				"after_conditions",
+				"after_steering_transmission",
+				"after_brakes",
+				"after_lights_geometry",
+			)],
+			[11, 1, 13, 6],
+		)
+		self.assertEqual(slots[-1]["title"], "Измерение скорости ТС")
+		self.assertEqual(len({slot["photo_type"] for slot in slots}), 31)
+
+	def test_photo_file_name_is_safe_for_windows(self):
+		self.assertEqual(photo_file_stem("Проверка: VIN/номер?"), "Проверка_ VIN_номер_")
+		self.assertEqual(photo_file_stem(" . "), "Фото")
+
+	def test_approve_moves_folder_to_completed_and_return_moves_it_back(self):
+		photo_id = self.upload_photo().data["id"]
+		Protocol.objects.filter(pk=self.protocol.pk).update(status="review", locked_by=None)
+
+		self.client.force_authenticate(user=self.manager)
+		self.assertEqual(self.post(f"/cars/protocols/{self.protocol.id}/approve/").status_code, 200)
+
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.status, "approved")
+		self.assertEqual(self.protocol.files_location, "completed")
+		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertTrue((self.completed / "00001" / "photos").is_dir())
+		file_response = self.client.get(f"/cars/protocol-photos/{photo_id}/file/")
+		self.assertEqual(file_response.status_code, 200)
+		# Открытый файл на Windows не даст перенести папку.
+		file_response.close()
+
+		self.assertEqual(self.post(f"/cars/protocols/{self.protocol.id}/return-to-draft/").status_code, 200)
+
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.status, "operator")
+		self.assertEqual(self.protocol.files_location, "in_progress")
+		self.assertFalse((self.completed / "00001").exists())
+		self.assertTrue((self.in_progress / "00001" / "photos").is_dir())
+
+	def test_approve_returns_folder_back_when_status_is_not_saved(self):
+		self.make_protocol_file(self.in_progress)
+		Protocol.objects.filter(pk=self.protocol.pk).update(status="review", locked_by=None)
+
+		self.client.force_authenticate(user=self.manager)
+		with patch.object(Protocol, "save", side_effect=RuntimeError("db is down")):
+			response = self.post(f"/cars/protocols/{self.protocol.id}/approve/")
+
+		self.assertEqual(response.status_code, 500)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.status, "review")
+		self.assertEqual(self.protocol.files_location, "in_progress")
+		self.assertTrue((self.in_progress / "00001" / "photos" / "old.jpg").exists())
+		self.assertFalse((self.completed / "00001").exists())
+
+	def test_approve_fails_without_merge_when_completed_folder_exists(self):
+		self.make_protocol_file(self.in_progress)
+		self.make_protocol_file(self.completed, name="other.txt")
+		Protocol.objects.filter(pk=self.protocol.pk).update(status="review", locked_by=None)
+
+		self.client.force_authenticate(user=self.manager)
+		response = self.post(f"/cars/protocols/{self.protocol.id}/approve/")
+
+		self.assertEqual(response.status_code, 409)
+		self.assertIn("уже существует", response.data["detail"])
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.status, "review")
+		self.assertTrue((self.in_progress / "00001" / "photos" / "old.jpg").exists())
+		self.assertFalse((self.completed / "00001" / "photos").exists())
+
+	def test_cancelled_protocol_folder_stays_in_progress(self):
+		self.make_protocol_file(self.in_progress)
+		Protocol.objects.filter(pk=self.protocol.pk).update(status="review", locked_by=None)
+
+		self.client.force_authenticate(user=self.manager)
+		self.assertEqual(self.post(f"/cars/protocols/{self.protocol.id}/cancel/").status_code, 200)
+
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.files_location, "in_progress")
+		self.assertTrue((self.in_progress / "00001" / "photos" / "old.jpg").exists())
+
+	def test_delete_protocol_removes_its_folder(self):
+		self.make_protocol_file(self.in_progress)
+
+		self.client.force_authenticate(user=self.superuser)
+		response = self.client.delete(f"/cars/protocols/{self.protocol.id}/delete/")
+
+		self.assertEqual(response.status_code, 204)
+		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertTrue(self.in_progress.is_dir())
+
+	def test_admin_clear_removes_only_protocol_folders(self):
+		from .admin import clear_protocol_data
+
+		self.make_protocol_file(self.in_progress)
+		unrelated = self.in_progress / "чужая папка" / "file.txt"
+		unrelated.parent.mkdir(parents=True)
+		unrelated.write_bytes(b"keep")
+
+		clear_protocol_data()
+
+		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertTrue(unrelated.exists())
+
+	def make_document_templates(self, templates_dir, titles=("protocol", "application", "tech_record")):
+		for name in titles:
+			template = Document()
+			template.add_paragraph(f"{name}: {{{{ protocol_number }}}} {{{{ applicant_name }}}}")
+			template.save(templates_dir / f"{name}_template.docx")
+
+	def generate_documents(self, templates_dir):
+		self.client.force_authenticate(user=self.measurer)
+		with patch("cars.services.protocol_docx_generator.TEMPLATES_DIR", templates_dir), patch(
+			"cars.services.protocol_docx_generator.count_word_pages",
+			return_value=1,
+		) as count_pages:
+			response = self.post(f"/cars/protocols/{self.protocol.id}/generate-docx/")
+		return response, count_pages
+
+	def test_generate_builds_all_documents_into_protocol_folder(self):
+		templates_dir = self.temp / "templates"
+		templates_dir.mkdir()
+		self.make_document_templates(templates_dir)
+		legacy_docx = self.in_progress / "00001" / "00001.docx"
+		legacy_docx.parent.mkdir(parents=True)
+		legacy_docx.write_bytes(b"old")
+		Protocol.objects.filter(pk=self.protocol.pk).update(
+			owner_name="Иванов И. И.",
+			owner_legal_entity="ООО «Ромашка»",
+		)
+
+		response, count_pages = self.generate_documents(templates_dir)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["folder"], str(self.in_progress / "00001"))
+		self.assertEqual(
+			response.data["files"],
+			["00001 Протокол.docx", "00001 Заявка.docx", "00001 Техзапись.docx"],
+		)
+		self.assertEqual(response.data["skipped"], [])
+		# Страницы через Word считаются только для протокола.
+		self.assertEqual(count_pages.call_count, 2)
+		self.assertEqual(
+			Document(self.in_progress / "00001" / "00001 Заявка.docx").paragraphs[0].text,
+			"application: 00001 ООО «Ромашка»",
+		)
+		self.assertEqual(
+			sorted(path.name for path in (self.in_progress / "00001").iterdir()),
+			["00001 Заявка.docx", "00001 Протокол.docx", "00001 Техзапись.docx"],
+		)
+
+	def test_generate_skips_documents_without_template(self):
+		templates_dir = self.temp / "templates"
+		templates_dir.mkdir()
+		self.make_document_templates(templates_dir, titles=("protocol",))
+
+		response, _ = self.generate_documents(templates_dir)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["files"], ["00001 Протокол.docx"])
+		self.assertEqual(
+			response.data["skipped"],
+			[
+				"Заявка (нет шаблона application_template.docx)",
+				"Техзапись (нет шаблона tech_record_template.docx)",
+			],
+		)
+
+	def test_busy_document_is_reported_and_others_are_still_built(self):
+		templates_dir = self.temp / "templates"
+		templates_dir.mkdir()
+		self.make_document_templates(templates_dir)
+		folder = self.in_progress / "00001"
+		folder.mkdir(parents=True)
+		busy = folder / "00001 Заявка.docx"
+		busy.write_bytes(b"opened in word")
+		real_replace = os.replace
+
+		def replace(source, target):
+			if Path(target) == busy:
+				raise PermissionError("locked")
+			real_replace(source, target)
+
+		with patch("cars.services.protocol_storage.os.replace", side_effect=replace):
+			response, _ = self.generate_documents(templates_dir)
+
+		self.assertEqual(response.status_code, 409)
+		self.assertIn("занят", response.data["detail"])
+		self.assertEqual(response.data["files"], ["00001 Протокол.docx", "00001 Техзапись.docx"])
+		self.assertEqual(busy.read_bytes(), b"opened in word")
+		self.assertEqual(
+			sorted(path.name for path in folder.iterdir()),
+			["00001 Заявка.docx", "00001 Протокол.docx", "00001 Техзапись.docx"],
+		)
+
+	def test_manufacture_year_comes_from_selected_manufacture_date(self):
+		self.protocol.manufacture_year = 2013
+		self.assertEqual(build_protocol_docx_context(self.protocol)["manufacture_year"], "2013")
+
+		self.protocol.manufacture_date = date(2014, 11, 1)
+		self.assertEqual(build_protocol_docx_context(self.protocol)["manufacture_year"], "2014")
+
+	def test_applicant_name_falls_back_to_owner_full_name(self):
+		self.protocol.owner_name = "Иванов И. И."
+		self.assertEqual(build_protocol_docx_context(self.protocol)["applicant_name"], "Иванов И. И.")
+
+		self.protocol.owner_legal_entity = "ООО «Ромашка»"
+		self.assertEqual(build_protocol_docx_context(self.protocol)["applicant_name"], "ООО «Ромашка»")
+
+	def test_folder_name_falls_back_to_padded_id(self):
+		self.assertEqual(protocol_folder_name(SimpleNamespace(id=7, protocol_number="A-15")), "A-15")
+		for number in (None, "", "TEMP-abc", "12/34", "bad:name", "dot."):
+			with self.subTest(number=number):
+				self.assertEqual(
+					protocol_folder_name(SimpleNamespace(id=7, protocol_number=number)),
+					"00007",
+				)
+
+	def test_storage_dirs_validation(self):
+		validate_storage_dirs(str(self.temp / "a"), str(self.temp / "b"))
+		validate_storage_dirs("", "")
+		self.assertTrue((self.media_root / "protocols" / "completed").is_dir())
+
+		invalid = [
+			("relative/path", str(self.temp / "b")),
+			(str(self.temp / "same"), str(self.temp / "same")),
+			(str(self.temp / "outer"), str(self.temp / "outer" / "inner")),
+		]
+		for in_progress, completed in invalid:
+			with self.subTest(in_progress=in_progress, completed=completed):
+				with self.assertRaises(ValidationError):
+					validate_storage_dirs(in_progress, completed)
+
+	def test_relocate_command_moves_legacy_photos(self):
+		legacy = self.media_root / "protocol_photos" / str(self.protocol.id) / "other_1.jpg"
+		legacy.parent.mkdir(parents=True)
+		legacy.write_bytes(b"legacy")
+		moved = ProtocolPhoto.objects.create(
+			protocol=self.protocol,
+			file_path=f"protocol_photos/{self.protocol.id}/other_1.jpg",
+		)
+		missing = ProtocolPhoto.objects.create(
+			protocol=self.protocol,
+			file_path=f"protocol_photos/{self.protocol.id}/lost.jpg",
+		)
+
+		call_command("relocate_protocol_files", "--dry-run", stdout=StringIO())
+		moved.refresh_from_db()
+		self.assertTrue(legacy.exists())
+		self.assertTrue(moved.file_path.startswith("protocol_photos/"))
+
+		output = StringIO()
+		call_command("relocate_protocol_files", stdout=output)
+		moved.refresh_from_db()
+		self.assertEqual(moved.file_path, "00001/photos/other_1.jpg")
+		self.assertEqual((self.in_progress / moved.file_path).read_bytes(), b"legacy")
+		self.assertFalse(legacy.exists())
+		self.assertIn(f"фото id={missing.id}", output.getvalue())
+
+	def test_relocate_command_creates_folders_for_protocols_without_files(self):
+		self.assertFalse((self.in_progress / "00001").exists())
+
+		call_command("relocate_protocol_files", "--dry-run", stdout=StringIO())
+		self.assertFalse((self.in_progress / "00001").exists())
+
+		call_command("relocate_protocol_files", stdout=StringIO())
+		self.assertTrue((self.in_progress / "00001").is_dir())
+
+	def test_relocate_command_moves_folders_from_previous_root(self):
+		old_root = self.temp / "old_in_progress"
+		self.make_protocol_file(old_root)
+		photo = ProtocolPhoto.objects.create(protocol=self.protocol, file_path="00001/photos/old.jpg")
+
+		call_command("relocate_protocol_files", "--source", str(old_root), stdout=StringIO())
+
+		self.assertFalse((old_root / "00001").exists())
+		self.assertTrue((self.in_progress / photo.file_path).exists())
 
 
 class ProtocolApplicabilityTests(SimpleTestCase):

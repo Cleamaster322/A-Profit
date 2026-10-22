@@ -14,6 +14,7 @@ import CircularProgress from "@mui/material/CircularProgress";
 
 import {
     deleteProtocolPhoto,
+    fetchProtocolPhotoBlob,
     uploadProtocolPhoto,
 } from "../../shared/protocolPhotoApi";
 import {
@@ -21,24 +22,6 @@ import {
     readPhotoCaptureMarker,
     savePhotoCaptureMarker,
 } from "./photoCaptureMarker";
-
-const DOCX_PHOTO_SLOTS = [
-    {
-        type: "stand_test_photo",
-        label: "Фото 1. Испытания на тормозном стенде",
-        sortOrder: 1,
-    },
-    {
-        type: "gas_test_photo",
-        label: "Фото 2. Измерение уровня выбросов отработавших газов",
-        sortOrder: 2,
-    },
-    {
-        type: "noise_test_photo",
-        label: "Фото 3. Измерение уровня шума",
-        sortOrder: 3,
-    },
-];
 
 const imageAccept = "image/*";
 
@@ -51,14 +34,87 @@ const invisibleInputSx = {
     opacity: 0,
 };
 
+const photoBoxSx = {
+    width: "100%",
+    height: 220,
+    backgroundColor: "#ffffff",
+    borderBottom: "1px solid #e0e0e0",
+};
+
+// Фото с защищённого адреса (нужен JWT) — грузим через api и показываем blob.
+// Компонент монтируется с key={fileUrl}, поэтому при смене фото состояние начинается заново.
+function ProtocolPhotoImage({ fileUrl, alt }) {
+    const [src, setSrc] = useState("");
+    const [failed, setFailed] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        let objectUrl = "";
+
+        fetchProtocolPhotoBlob(fileUrl)
+            .then((blob) => {
+                if (cancelled) {
+                    return;
+                }
+
+                objectUrl = URL.createObjectURL(blob);
+                setSrc(objectUrl);
+            })
+            .catch(() => {
+                if (!cancelled) {
+                    setFailed(true);
+                }
+            });
+
+        return () => {
+            cancelled = true;
+
+            if (objectUrl) {
+                URL.revokeObjectURL(objectUrl);
+            }
+        };
+    }, [fileUrl]);
+
+    if (!src) {
+        return (
+            <Box
+                sx={{
+                    ...photoBoxSx,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    color: "text.secondary",
+                }}
+            >
+                {failed ? "Не удалось загрузить фото" : <CircularProgress size={24} />}
+            </Box>
+        );
+    }
+
+    return (
+        <CardMedia
+            component="img"
+            image={src}
+            alt={alt}
+            sx={{
+                ...photoBoxSx,
+                objectFit: "contain",
+            }}
+        />
+    );
+}
+
+// Группа «Фотофиксация»: слоты фото из схемы (photo_slots.py), которые
+// показываются после одного блока страницы протокола. В каждом слоте одно фото.
 function ProtocolInspectionPhotos({
     protocolId,
+    group,
+    slots = [],
     photos = [],
     setPhotos,
     onRestoreLock,
     sectionPaperSx,
     sectionTitleSx,
-    subsectionTitleSx,
 }) {
     const [uploadingType, setUploadingType] = useState(null);
     const [deletingId, setDeletingId] = useState(null);
@@ -66,36 +122,23 @@ function ProtocolInspectionPhotos({
     const [lostCapture, setLostCapture] = useState(null);
 
     const sectionRef = useRef(null);
-    const mainFileInputRefs = useRef({});
-    const mainCameraInputRefs = useRef({});
-    const additionalFileInputRef = useRef(null);
-    const additionalCameraInputRef = useRef(null);
+    const fileInputRefs = useRef({});
+    const cameraInputRefs = useRef({});
+
+    const groupSlots = useMemo(
+        () => slots.filter((slot) => slot.group === group),
+        [slots, group]
+    );
 
     const photosByType = useMemo(() => {
         const result = {};
 
         photos.forEach((photo) => {
-            if (!result[photo.photo_type]) {
-                result[photo.photo_type] = photo;
-            }
+            result[photo.photo_type] = photo;
         });
 
         return result;
     }, [photos]);
-
-    const additionalPhotos = useMemo(() => {
-        return photos.filter((photo) => !photo.is_docx_photo);
-    }, [photos]);
-
-    const sortPhotos = (items) => {
-        return [...items].sort((a, b) => {
-            if (a.sort_order === b.sort_order) {
-                return a.id - b.id;
-            }
-
-            return a.sort_order - b.sort_order;
-        });
-    };
 
     const getUploadErrorText = (err, defaultMessage) => {
         return (
@@ -110,9 +153,9 @@ function ProtocolInspectionPhotos({
     // Загрузка с одним повтором: если сервер ответил 403 (блокировка протокола
     // потеряна, например после возврата из камеры), занимаем протокол заново
     // и отправляем фото ещё раз.
-    const uploadWithLockRetry = async (file, photoType, sortOrder) => {
+    const uploadWithLockRetry = async (file, photoType) => {
         try {
-            return await uploadProtocolPhoto(protocolId, file, photoType, sortOrder);
+            return await uploadProtocolPhoto(protocolId, file, photoType);
         } catch (err) {
             if (err?.response?.status !== 403 || !onRestoreLock) {
                 throw err;
@@ -120,25 +163,28 @@ function ProtocolInspectionPhotos({
 
             await onRestoreLock();
 
-            return await uploadProtocolPhoto(protocolId, file, photoType, sortOrder);
+            return await uploadProtocolPhoto(protocolId, file, photoType);
         }
     };
 
     // Отметка дожила до загрузки страницы — значит, вкладку выгрузили,
-    // пока была открыта камера, и снимок потерян.
+    // пока была открыта камера, и снимок потерян. Показывает её та группа,
+    // из которой открывали камеру.
     useEffect(() => {
         if (!protocolId) {
             return;
         }
 
         const marker = readPhotoCaptureMarker(protocolId);
-        clearPhotoCaptureMarker(protocolId);
 
-        if (marker) {
-            setLostCapture(marker);
-            sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+        if (!marker || marker.group !== group) {
+            return;
         }
-    }, [protocolId]);
+
+        clearPhotoCaptureMarker(protocolId);
+        setLostCapture(marker);
+        sectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, [protocolId, group]);
 
     // Страница пережила переход в камеру: снимок придёт через onChange
     // (или пользователь отменил съёмку), отметка больше не нужна.
@@ -169,13 +215,13 @@ function ProtocolInspectionPhotos({
         input.click();
     };
 
-    const openCamera = (input, slotLabel) => {
+    const openCamera = (input, slotTitle) => {
         setLostCapture(null);
-        savePhotoCaptureMarker(protocolId, slotLabel);
+        savePhotoCaptureMarker(protocolId, slotTitle, group);
         openInput(input);
     };
 
-    const handleMainPhotoUpload = async (event, slot) => {
+    const handlePhotoUpload = async (event, slot) => {
         const file = event.target.files?.[0];
 
         if (!file) {
@@ -185,55 +231,16 @@ function ProtocolInspectionPhotos({
 
         try {
             setError("");
-            setUploadingType(slot.type);
+            setUploadingType(slot.photo_type);
 
-            const uploadedPhoto = await uploadWithLockRetry(
-                file,
-                slot.type,
-                slot.sortOrder
-            );
+            const uploadedPhoto = await uploadWithLockRetry(file, slot.photo_type);
 
-            const nextPhotos = sortPhotos([
-                ...photos.filter((photo) => photo.photo_type !== slot.type),
+            setPhotos((currentPhotos) => [
+                ...currentPhotos.filter((photo) => photo.photo_type !== slot.photo_type),
                 uploadedPhoto,
             ]);
-
-            setPhotos(nextPhotos);
         } catch (err) {
             setError(getUploadErrorText(err, "Не удалось загрузить фото"));
-        } finally {
-            setUploadingType(null);
-            event.target.value = "";
-        }
-    };
-
-    const handleAdditionalPhotosUpload = async (event) => {
-        const files = Array.from(event.target.files || []);
-
-        if (!files.length) {
-            event.target.value = "";
-            return;
-        }
-
-        try {
-            setError("");
-            setUploadingType("other");
-
-            const uploadedPhotos = [];
-
-            for (const file of files) {
-                const uploadedPhoto = await uploadWithLockRetry(
-                    file,
-                    "other",
-                    10
-                );
-
-                uploadedPhotos.push(uploadedPhoto);
-            }
-
-            setPhotos(sortPhotos([...photos, ...uploadedPhotos]));
-        } catch (err) {
-            setError(getUploadErrorText(err, "Не удалось загрузить дополнительные фото"));
         } finally {
             setUploadingType(null);
             event.target.value = "";
@@ -247,7 +254,7 @@ function ProtocolInspectionPhotos({
 
             await deleteProtocolPhoto(photoId);
 
-            setPhotos(photos.filter((photo) => photo.id !== photoId));
+            setPhotos((currentPhotos) => currentPhotos.filter((photo) => photo.id !== photoId));
         } catch (err) {
             setError(
                 err?.response?.data?.error ||
@@ -259,10 +266,14 @@ function ProtocolInspectionPhotos({
         }
     };
 
+    if (!groupSlots.length) {
+        return null;
+    }
+
     return (
         <Paper ref={sectionRef} sx={sectionPaperSx}>
             <Typography variant="h5" sx={sectionTitleSx}>
-                3. Фото автомобиля
+                Фотофиксация
             </Typography>
 
             {lostCapture && (
@@ -283,60 +294,48 @@ function ProtocolInspectionPhotos({
                 </Alert>
             )}
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Фото для протокола
-            </Typography>
-
-            <Grid container spacing={2} sx={{ mb: 4 }}>
-                {DOCX_PHOTO_SLOTS.map((slot) => {
-                    const photo = photosByType[slot.type];
-                    const isUploading = uploadingType === slot.type;
+            <Grid container spacing={2}>
+                {groupSlots.map((slot) => {
+                    const photo = photosByType[slot.photo_type];
+                    const isUploading = uploadingType === slot.photo_type;
                     const isDeleting = photo && deletingId === photo.id;
 
                     return (
-                        <Grid item xs={12} md={4} key={slot.type}>
-                            <Card variant="outlined">
+                        <Grid item xs={12} sm={6} md={4} key={slot.photo_type}>
+                            <Card variant="outlined" sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
                                 {photo?.file_url ? (
-                                    <CardMedia
-                                        component="img"
-                                        image={photo.file_url}
-                                        alt={slot.label}
-                                        sx={{
-                                            height: 220,
-                                            width: "100%",
-                                            objectFit: "contain",
-                                            backgroundColor: "#ffffff",
-                                            borderBottom: "1px solid #e0e0e0",
-                                        }}
+                                    <ProtocolPhotoImage
+                                        key={photo.file_url}
+                                        fileUrl={photo.file_url}
+                                        alt={slot.title}
                                     />
                                 ) : (
                                     <Box
                                         sx={{
-                                            height: 220,
+                                            ...photoBoxSx,
                                             display: "flex",
                                             alignItems: "center",
                                             justifyContent: "center",
                                             bgcolor: "#f5f5f5",
                                             color: "text.secondary",
-                                            borderBottom: "1px solid #e0e0e0",
                                         }}
                                     >
                                         Фото не загружено
                                     </Box>
                                 )}
 
-                                <CardContent>
+                                <CardContent sx={{ flexGrow: 1 }}>
                                     <Typography variant="subtitle1">
-                                        {slot.label}
+                                        {slot.title}
                                     </Typography>
 
-                                    {photo?.file_path && (
+                                    {slot.description && (
                                         <Typography
                                             variant="body2"
                                             color="text.secondary"
-                                            sx={{ mt: 1, wordBreak: "break-all" }}
+                                            sx={{ mt: 0.5 }}
                                         >
-                                            {photo.file_path}
+                                            {slot.description}
                                         </Typography>
                                     )}
                                 </CardContent>
@@ -350,27 +349,23 @@ function ProtocolInspectionPhotos({
                                 >
                                     <input
                                         ref={(element) => {
-                                            mainFileInputRefs.current[slot.type] = element;
+                                            fileInputRefs.current[slot.photo_type] = element;
                                         }}
                                         style={invisibleInputSx}
                                         type="file"
                                         accept={imageAccept}
-                                        onChange={(event) =>
-                                            handleMainPhotoUpload(event, slot)
-                                        }
+                                        onChange={(event) => handlePhotoUpload(event, slot)}
                                     />
 
                                     <input
                                         ref={(element) => {
-                                            mainCameraInputRefs.current[slot.type] = element;
+                                            cameraInputRefs.current[slot.photo_type] = element;
                                         }}
                                         style={invisibleInputSx}
                                         type="file"
                                         accept={imageAccept}
                                         capture="environment"
-                                        onChange={(event) =>
-                                            handleMainPhotoUpload(event, slot)
-                                        }
+                                        onChange={(event) => handlePhotoUpload(event, slot)}
                                     />
 
                                     <Button
@@ -378,7 +373,7 @@ function ProtocolInspectionPhotos({
                                         size="small"
                                         disabled={isUploading}
                                         onClick={() =>
-                                            openInput(mainFileInputRefs.current[slot.type])
+                                            openInput(fileInputRefs.current[slot.photo_type])
                                         }
                                     >
                                         {isUploading ? (
@@ -399,8 +394,8 @@ function ProtocolInspectionPhotos({
                                         disabled={isUploading}
                                         onClick={() =>
                                             openCamera(
-                                                mainCameraInputRefs.current[slot.type],
-                                                slot.label
+                                                cameraInputRefs.current[slot.photo_type],
+                                                slot.title
                                             )
                                         }
                                     >
@@ -424,111 +419,6 @@ function ProtocolInspectionPhotos({
                     );
                 })}
             </Grid>
-
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Дополнительные фото
-            </Typography>
-
-            <Box
-                sx={{
-                    mb: 2,
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: 1,
-                }}
-            >
-                <input
-                    ref={additionalFileInputRef}
-                    style={invisibleInputSx}
-                    multiple
-                    type="file"
-                    accept={imageAccept}
-                    onChange={handleAdditionalPhotosUpload}
-                />
-
-                <input
-                    ref={additionalCameraInputRef}
-                    style={invisibleInputSx}
-                    type="file"
-                    accept={imageAccept}
-                    capture="environment"
-                    onChange={handleAdditionalPhotosUpload}
-                />
-
-                <Button
-                    variant="contained"
-                    disabled={uploadingType === "other"}
-                    onClick={() => openInput(additionalFileInputRef.current)}
-                >
-                    {uploadingType === "other" ? (
-                        <>
-                            <CircularProgress size={16} sx={{ mr: 1 }} />
-                            Загрузка
-                        </>
-                    ) : (
-                        "Добавить дополнительные фото"
-                    )}
-                </Button>
-
-                <Button
-                    variant="outlined"
-                    disabled={uploadingType === "other"}
-                    onClick={() =>
-                        openCamera(additionalCameraInputRef.current, "Дополнительное фото")
-                    }
-                >
-                    Сделать дополнительное фото
-                </Button>
-            </Box>
-
-            {additionalPhotos.length === 0 ? (
-                <Alert severity="info" sx={{ borderRadius: 0 }}>
-                    Дополнительные фото не загружены.
-                </Alert>
-            ) : (
-                <Grid container spacing={2}>
-                    {additionalPhotos.map((photo) => {
-                        const isDeleting = deletingId === photo.id;
-
-                        return (
-                            <Grid item xs={12} sm={6} md={3} key={photo.id}>
-                                <Card variant="outlined">
-                                    <CardMedia
-                                        component="img"
-                                        image={photo.file_url}
-                                        alt={photo.caption || "Дополнительное фото"}
-                                        sx={{
-                                            height: 160,
-                                            width: "100%",
-                                            objectFit: "contain",
-                                            backgroundColor: "#ffffff",
-                                            borderBottom: "1px solid #e0e0e0",
-                                        }}
-                                    />
-
-                                    <CardContent>
-                                        <Typography variant="body2">
-                                            {photo.caption || "Дополнительное фото"}
-                                        </Typography>
-                                    </CardContent>
-
-                                    <CardActions>
-                                        <Button
-                                            variant="outlined"
-                                            color="error"
-                                            size="small"
-                                            disabled={isDeleting}
-                                            onClick={() => handleDeletePhoto(photo.id)}
-                                        >
-                                            {isDeleting ? "Удаление..." : "Удалить"}
-                                        </Button>
-                                    </CardActions>
-                                </Card>
-                            </Grid>
-                        );
-                    })}
-                </Grid>
-            )}
         </Paper>
     );
 }

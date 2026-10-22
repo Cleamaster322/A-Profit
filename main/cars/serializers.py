@@ -4,7 +4,9 @@ from uuid import uuid4
 from rest_framework import serializers
 from django.contrib.auth.models import User, Group
 from django.conf import settings
+from django.urls import reverse
 
+from .photo_slots import PHOTO_SLOT_TITLES, slot_photos
 from .models import (
     Brand,
     Model,
@@ -610,7 +612,6 @@ class ProtocolLightSerializer(
 class ProtocolPhotoSerializer(serializers.ModelSerializer):
     file_url = serializers.SerializerMethodField()
     caption = serializers.SerializerMethodField()
-    is_docx_photo = serializers.SerializerMethodField()
 
     class Meta:
         model = ProtocolPhoto
@@ -621,7 +622,6 @@ class ProtocolPhotoSerializer(serializers.ModelSerializer):
             'file_path',
             'file_url',
             'caption',
-            'is_docx_photo',
             'sort_order',
             'created_at',
         ]
@@ -631,37 +631,30 @@ class ProtocolPhotoSerializer(serializers.ModelSerializer):
             'file_path',
             'file_url',
             'caption',
-            'is_docx_photo',
+            'sort_order',
             'created_at',
         ]
 
     def get_file_url(self, obj):
+        """
+        Фото отдаются через защищённый адрес (нужен JWT), а не через MEDIA_URL:
+        файлы лежат в папках протоколов вне media и должны открываться при DEBUG=false.
+        """
         if not obj.file_path:
             return None
 
-        request = self.context.get('request')
-        url = f"{settings.MEDIA_URL}{obj.file_path}"
-
-        if request:
-            return request.build_absolute_uri(url)
-
-        return url
+        return reverse('protocol-photo-file', kwargs={'photo_id': obj.id})
 
     def get_caption(self, obj):
-        captions = {
-            'stand_test_photo': 'Фото 1. Испытания на тормозном стенде',
-            'gas_test_photo': 'Фото 2. Измерение уровня выбросов отработавших газов',
-            'noise_test_photo': 'Фото 3. Измерение уровня шума',
-        }
+        return PHOTO_SLOT_TITLES.get(obj.photo_type, obj.photo_type)
 
-        return captions.get(obj.photo_type, obj.get_photo_type_display())
 
-    def get_is_docx_photo(self, obj):
-        return obj.photo_type in [
-            'stand_test_photo',
-            'gas_test_photo',
-            'noise_test_photo',
-        ]
+class SlotPhotosMixin(serializers.Serializer):
+    # Только фото из схемы фотофиксации, старые типы не отдаём.
+    photos = serializers.SerializerMethodField()
+
+    def get_photos(self, obj):
+        return ProtocolPhotoSerializer(slot_photos(obj), many=True, context=self.context).data
 
 
 class ProtocolTestConditionSerializer(
@@ -710,7 +703,7 @@ class ProtocolPowerSupplySerializer(
 # Полный / детальный протокол
 # =========================
 
-class ProtocolDetailSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolDetailSerializer(SlotPhotosMixin, DashFieldsSerializerMixin, serializers.ModelSerializer):
     locked_by_username = serializers.CharField(
         source='locked_by.username',
         read_only=True
@@ -725,7 +718,6 @@ class ProtocolDetailSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
     test_conditions = ProtocolTestConditionSerializer(read_only=True)
     road_conditions = ProtocolRoadConditionSerializer(read_only=True)
     power_supply = ProtocolPowerSupplySerializer(read_only=True)
-    photos = ProtocolPhotoSerializer(many=True, read_only=True)
 
     class Meta:
         model = Protocol
@@ -754,7 +746,7 @@ class ProtocolDetailSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
         return obj.cancelled_by.username
 
 
-class ProtocolFullSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer):
+class ProtocolFullSerializer(SlotPhotosMixin, DashFieldsSerializerMixin, serializers.ModelSerializer):
     locked_by_username = serializers.CharField(
         source='locked_by.username',
         read_only=True
@@ -769,7 +761,6 @@ class ProtocolFullSerializer(DashFieldsSerializerMixin, serializers.ModelSeriali
     test_conditions = ProtocolTestConditionSerializer(read_only=True)
     road_conditions = ProtocolRoadConditionSerializer(read_only=True)
     power_supply = ProtocolPowerSupplySerializer(read_only=True)
-    photos = ProtocolPhotoSerializer(many=True, read_only=True)
 
     class Meta:
         model = Protocol
@@ -826,6 +817,7 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             'owner_address',
             'owner_document',
             'owner_phone',
+            'owner_legal_entity',
             'manufacturer_info',
             'header_document_selections',
 

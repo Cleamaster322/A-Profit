@@ -41,6 +41,8 @@ from .views import (
     get_protocol_brake,
     get_protocol_light,
     get_protocol_measurement,
+    get_protocol_photo_file,
+    get_protocol_photo_slots,
     get_protocol_photos,
     get_protocol_power_supply,
     get_protocol_road_conditions,
@@ -70,7 +72,6 @@ from .views import (
     update_protocol_brake,
     update_protocol_light,
     update_protocol_measurement,
-    update_protocol_photo,
     update_protocol_power_supply,
     update_protocol_road_conditions,
     update_protocol_test_conditions,
@@ -203,10 +204,15 @@ urlpatterns = [
     # =========================================================
     # --- PHOTOS ---
     # =========================================================
+    path('protocol-photo-slots/', get_protocol_photo_slots),
     path('protocols/<int:protocol_id>/photos/', protocol_access_required(get_protocol_photos)),
     path('protocols/<int:protocol_id>/photos/create/', protocol_access_required(create_protocol_photo)),
-    path('protocol-photos/<int:photo_id>/update/', protocol_access_required(update_protocol_photo)),
     path('protocol-photos/<int:photo_id>/delete/', protocol_access_required(delete_protocol_photo)),
+    path(
+        'protocol-photos/<int:photo_id>/file/',
+        protocol_access_required(get_protocol_photo_file),
+        name='protocol-photo-file',
+    ),
 
     # =========================================================
     # --- USERS ---

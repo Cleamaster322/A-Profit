@@ -1,7 +1,3 @@
-import shutil
-from pathlib import Path
-
-from django.conf import settings
 from django.contrib import admin, messages
 from django.db import connection, transaction
 from django.http import HttpResponseRedirect
@@ -21,15 +17,13 @@ from .models import (
     ProtocolPhoto,
     ProtocolPowerSupply,
     ProtocolRoadCondition,
+    ProtocolStorageSettings,
     ProtocolTestCondition,
 )
+from .services.protocol_storage import protocol_file_dirs, remove_dirs
 
 ADMIN_USERNAME = 'admin'
 CLEAR_CONFIRM_WORD = 'УДАЛИТЬ'
-
-# Только файлы протоколов; media/generations относится к данным парсера.
-PROTOCOL_MEDIA_DIRS = ('protocol_photos', 'generated_protocols')
-
 
 # Protocol должен идти последним: дочерние таблицы чистятся раньше.
 PROTOCOL_MODELS = (
@@ -55,6 +49,13 @@ admin.site.site_header = 'Администрирование'
 
 def clear_protocol_data():
     """Удаляет протоколы и связанные данные. Brand/Model/Generation/Configuration/CarData не затрагиваются."""
+    # Удаляем только папки протоколов из БД: в корневых папках может лежать что-то ещё.
+    file_dirs = [
+        path
+        for protocol in Protocol.objects.all()
+        for path in protocol_file_dirs(protocol)
+    ]
+
     with transaction.atomic():
         for model in PROTOCOL_MODELS[:-1]:
             model.objects.all().delete()
@@ -69,16 +70,7 @@ def clear_protocol_data():
             elif connection.vendor == 'sqlite':
                 cursor.execute('DELETE FROM sqlite_sequence WHERE name = %s', [table])
 
-    media_root = Path(settings.MEDIA_ROOT)
-    for dir_name in PROTOCOL_MEDIA_DIRS:
-        directory = media_root / dir_name
-        if not directory.is_dir():
-            continue
-        for item in directory.iterdir():
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-            else:
-                item.unlink(missing_ok=True)
+    remove_dirs(file_dirs)
 
     return deleted_protocols
 
@@ -128,6 +120,16 @@ class ProtocolAdmin(admin.ModelAdmin):
             'changelist_url': changelist_url,
         }
         return TemplateResponse(request, 'admin/cars/protocol/clear_all.html', context)
+
+
+@admin.register(ProtocolStorageSettings)
+class ProtocolStorageSettingsAdmin(admin.ModelAdmin):
+    # Одна запись: добавить можно, только пока её нет; удалять нельзя.
+    def has_add_permission(self, request):
+        return not ProtocolStorageSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 admin.site.register(Brand)

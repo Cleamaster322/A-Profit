@@ -1,4 +1,7 @@
 import logging
+import mimetypes
+import shutil
+import tempfile
 from datetime import date, timedelta
 
 from asgiref.sync import async_to_sync
@@ -16,10 +19,8 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from pathlib import Path
-from uuid import uuid4
 
 from django.conf import settings
-from django.core.files.storage import default_storage
 
 from .models import (
     Brand,
@@ -37,6 +38,7 @@ from .models import (
     ProtocolPowerSupply,
 )
 from .pagination import Pagination
+from .photo_slots import PHOTO_SLOT_ORDER, PHOTO_SLOT_TITLES, photo_slots_payload, slot_photos
 from .serializers import (
     BrandSerializer,
     ModelSerializer,
@@ -59,7 +61,20 @@ from .serializers import (
     CreateUserSerializer,
     UpdateUserSerializer,
 )
-from .services.protocol_docx_generator import generate_protocol_docx
+from .services.protocol_docx_generator import generate_protocol_docx, generate_protocol_documents
+from .services.protocol_storage import (
+    COMPLETED,
+    IN_PROGRESS,
+    ProtocolStorageError,
+    create_protocol_dir,
+    delete_photo_file,
+    photo_absolute_path,
+    protocol_file_dirs,
+    protocol_files_moved_to,
+    protocol_folder_name,
+    remove_dirs,
+    save_photo_file,
+)
 from .services.protocol_pdf import cleanup_pdf_preview, convert_docx_to_pdf
 from .word_utils import create_car_word_doc
 
@@ -1483,6 +1498,13 @@ def create_protocol(request):
             protocol.protocol_number = str(protocol.id).zfill(5)
             protocol.save(update_fields=['protocol_number'])
 
+            # Папка нужна сразу; если диск недоступен, протокол всё равно создаём —
+            # папка появится при первом фото или DOCX.
+            try:
+                create_protocol_dir(protocol)
+            except OSError:
+                logger.exception('Protocol %s folder was not created', protocol.id)
+
             return Response(
                 ProtocolSerializer(protocol).data,
                 status=status.HTTP_201_CREATED
@@ -1648,15 +1670,18 @@ def return_protocol_to_draft(request, pk):
                 protocol.cancelled_at = None
                 protocol.locked_by = request.user
                 protocol.locked_at = timezone.now()
-                protocol.save(update_fields=[
-                    'status',
-                    'returned_for_revision',
-                    'revision_comment',
-                    'cancelled_by',
-                    'cancelled_at',
-                    'locked_by',
-                    'locked_at',
-                ])
+
+                with protocol_files_moved_to(protocol, IN_PROGRESS):
+                    protocol.save(update_fields=[
+                        'status',
+                        'files_location',
+                        'returned_for_revision',
+                        'revision_comment',
+                        'cancelled_by',
+                        'cancelled_at',
+                        'locked_by',
+                        'locked_at',
+                    ])
             elif protocol.locked_by_id == request.user.id:
                 protocol.locked_by = None
                 protocol.locked_at = None
@@ -1665,6 +1690,10 @@ def return_protocol_to_draft(request, pk):
         notify_protocol_status_changed(protocol)
 
         return Response(ProtocolSerializer(protocol).data)
+
+    except ProtocolStorageError as error:
+        logger.warning('Protocol %s files were not moved: %s', pk, error)
+        return Response({'detail': str(error)}, status=status.HTTP_409_CONFLICT)
 
     except Exception:
         logger.exception('Unhandled exception in cars API')
@@ -1943,19 +1972,27 @@ def approve_protocol(request, pk):
             protocol.locked_by = None
             protocol.locked_at = None
 
-            protocol.save(update_fields=[
-                'status',
-                'returned_for_revision',
-                'revision_comment',
-                'cancelled_by',
-                'cancelled_at',
-                'locked_by',
-                'locked_at',
-            ])
+            # Сначала переносим папку, потом сохраняем статус;
+            # если сохранить не удалось, папка вернётся назад.
+            with protocol_files_moved_to(protocol, COMPLETED):
+                protocol.save(update_fields=[
+                    'status',
+                    'files_location',
+                    'returned_for_revision',
+                    'revision_comment',
+                    'cancelled_by',
+                    'cancelled_at',
+                    'locked_by',
+                    'locked_at',
+                ])
 
         notify_protocol_status_changed(protocol)
 
         return Response(ProtocolSerializer(protocol).data)
+
+    except ProtocolStorageError as error:
+        logger.warning('Protocol %s files were not moved: %s', pk, error)
+        return Response({'detail': str(error)}, status=status.HTTP_409_CONFLICT)
 
     except Exception:
         logger.exception('Unhandled exception in cars API')
@@ -2025,7 +2062,9 @@ def delete_protocol(request, pk):
         if not user_can_access_protocol(request, protocol):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
+        file_dirs = protocol_file_dirs(protocol)
         protocol.delete()
+        remove_dirs(file_dirs)
         return Response(status=status.HTTP_204_NO_CONTENT)
     except Exception:
         logger.exception('Unhandled exception in cars API')
@@ -2257,12 +2296,6 @@ def update_protocol_light(request, protocol_id):
         return internal_server_error()
 
 
-DOCX_PHOTO_TYPES = [
-    'stand_test_photo',
-    'gas_test_photo',
-    'noise_test_photo',
-]
-
 ALLOWED_PHOTO_EXTENSIONS = [
     '.jpg',
     '.jpeg',
@@ -2299,27 +2332,15 @@ def validate_photo_file(uploaded_file):
     return None
 
 
-def build_protocol_photo_path(protocol_id, photo_type, uploaded_file):
-    extension = Path(uploaded_file.name).suffix.lower()
-    filename = f'{photo_type}_{uuid4().hex}{extension}'
-
-    return f'protocol_photos/{protocol_id}/{filename}'
-
-
-def delete_photo_file_if_exists(file_path):
-    if not file_path:
-        return
-
-    try:
-        if default_storage.exists(file_path):
-            default_storage.delete(file_path)
-    except Exception:
-        pass
-
-
 # =========================================================
 # --- PROTOCOL-PHOTO FUNCTIONS ---
 # =========================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_protocol_photo_slots(request):
+    return Response(photo_slots_payload())
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
@@ -2329,14 +2350,8 @@ def get_protocol_photos(request, protocol_id):
         if not protocol:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        queryset = (
-            ProtocolPhoto.objects
-            .filter(protocol_id=protocol_id)
-            .order_by('sort_order', 'id')
-        )
-
         serializer = ProtocolPhotoSerializer(
-            queryset,
+            slot_photos(protocol),
             many=True,
             context={'request': request}
         )
@@ -2365,43 +2380,32 @@ def create_protocol_photo(request, protocol_id):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        photo_type = request.data.get('photo_type') or 'other'
+        photo_type = request.data.get('photo_type')
 
-        allowed_types = [choice[0] for choice in ProtocolPhoto.PHOTO_TYPE_CHOICES]
-        if photo_type not in allowed_types:
+        if photo_type not in PHOTO_SLOT_TITLES:
             return Response(
                 {'photo_type': 'Недопустимый тип фото'},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        sort_order = request.data.get('sort_order') or 0
-
-        # Для трёх фото, которые идут в DOCX,
-        # храним только одно актуальное фото каждого типа.
-        if photo_type in DOCX_PHOTO_TYPES:
-            old_photos = ProtocolPhoto.objects.filter(
-                protocol_id=protocol_id,
-                photo_type=photo_type
-            )
-
-            for old_photo in old_photos:
-                delete_photo_file_if_exists(old_photo.file_path)
-
-            old_photos.delete()
-
-        relative_path = build_protocol_photo_path(
+        # Одно фото на слот: новое заменяет старое.
+        old_photos = ProtocolPhoto.objects.filter(
             protocol_id=protocol_id,
-            photo_type=photo_type,
-            uploaded_file=uploaded_file
+            photo_type=photo_type
         )
 
-        saved_path = default_storage.save(relative_path, uploaded_file)
+        for old_photo in old_photos:
+            delete_photo_file(old_photo, protocol)
+
+        old_photos.delete()
+
+        saved_path = save_photo_file(protocol, PHOTO_SLOT_TITLES[photo_type], uploaded_file)
 
         photo = ProtocolPhoto.objects.create(
             protocol=protocol,
             photo_type=photo_type,
             file_path=saved_path,
-            sort_order=sort_order,
+            sort_order=PHOTO_SLOT_ORDER[photo_type],
         )
 
         serializer = ProtocolPhotoSerializer(
@@ -2416,90 +2420,46 @@ def create_protocol_photo(request, protocol_id):
         return internal_server_error()
 
 
-@api_view(['PUT', 'PATCH'])
+@api_view(['DELETE'])
 @permission_classes([IsAuthenticated])
-def update_protocol_photo(request, photo_id):
+def delete_protocol_photo(request, photo_id):
     try:
-        photo = ProtocolPhoto.objects.filter(pk=photo_id).first()
+        photo = ProtocolPhoto.objects.select_related('protocol').filter(pk=photo_id).first()
         if not photo:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        uploaded_file = get_uploaded_photo_file(request)
+        delete_photo_file(photo)
 
-        new_photo_type = request.data.get('photo_type', photo.photo_type)
-        new_sort_order = request.data.get('sort_order', photo.sort_order)
+        photo.delete()
 
-        allowed_types = [choice[0] for choice in ProtocolPhoto.PHOTO_TYPE_CHOICES]
-        if new_photo_type not in allowed_types:
-            return Response(
-                {'photo_type': 'Недопустимый тип фото'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Если фото переводят в один из трёх DOCX-типов,
-        # удаляем другие фото этого же типа у этого протокола.
-        if new_photo_type in DOCX_PHOTO_TYPES:
-            duplicates = (
-                ProtocolPhoto.objects
-                .filter(
-                    protocol_id=photo.protocol_id,
-                    photo_type=new_photo_type
-                )
-                .exclude(pk=photo.pk)
-            )
-
-            for duplicate in duplicates:
-                delete_photo_file_if_exists(duplicate.file_path)
-
-            duplicates.delete()
-
-        if uploaded_file:
-            file_error = validate_photo_file(uploaded_file)
-            if file_error:
-                return Response(
-                    {'file': file_error},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-            delete_photo_file_if_exists(photo.file_path)
-
-            relative_path = build_protocol_photo_path(
-                protocol_id=photo.protocol_id,
-                photo_type=new_photo_type,
-                uploaded_file=uploaded_file
-            )
-
-            photo.file_path = default_storage.save(relative_path, uploaded_file)
-
-        photo.photo_type = new_photo_type
-        photo.sort_order = new_sort_order
-        photo.save(update_fields=['photo_type', 'file_path', 'sort_order'])
-
-        serializer = ProtocolPhotoSerializer(
-            photo,
-            context={'request': request}
-        )
-
-        return Response(serializer.data)
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
     except Exception:
         logger.exception('Unhandled exception in cars API')
         return internal_server_error()
 
 
-@api_view(['DELETE'])
+@api_view(['GET'])
 @permission_classes([IsAuthenticated])
-def delete_protocol_photo(request, photo_id):
+def get_protocol_photo_file(request, photo_id):
     try:
-        photo = ProtocolPhoto.objects.filter(pk=photo_id).first()
+        photo = ProtocolPhoto.objects.select_related('protocol').filter(pk=photo_id).first()
         if not photo:
             return Response(status=status.HTTP_404_NOT_FOUND)
 
-        delete_photo_file_if_exists(photo.file_path)
+        path = photo_absolute_path(photo)
+        if path is None or not path.is_file():
+            return Response(
+                {'detail': 'Файл фото не найден на диске.'},
+                status=status.HTTP_404_NOT_FOUND
+            )
 
-        photo.delete()
+        content_type, _ = mimetypes.guess_type(path.name)
 
-        return Response(status=status.HTTP_204_NO_CONTENT)
+        return FileResponse(
+            open(path, 'rb'),
+            content_type=content_type or 'application/octet-stream',
+        )
 
     except Exception:
         logger.exception('Unhandled exception in cars API')
@@ -2963,14 +2923,24 @@ def generate_protocol_docx_file(request, protocol_id):
         if not user_can_access_protocol(request, protocol):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
-        file_path = generate_protocol_docx(protocol)
+        # Кнопка «Сформировать»: все документы протокола сохраняются в его папку,
+        # в браузер ничего не скачивается.
+        result = generate_protocol_documents(protocol)
+        data = {
+            'folder': str(result['folder']),
+            'files': [path.name for path in result['files']],
+            'skipped': result['skipped'],
+            'errors': result['errors'],
+        }
 
-        return FileResponse(
-            open(file_path, 'rb'),
-            as_attachment=True,
-            filename=file_path.name,
-            content_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-        )
+        if result['errors']:
+            # Файл открыт в Word: остальные документы собраны, этот — нет.
+            return Response(
+                {**data, 'detail': ' '.join(result['errors'])},
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        return Response(data)
     except Exception:
         logger.exception('Unhandled exception in cars API')
         return internal_server_error()
@@ -2980,6 +2950,7 @@ def generate_protocol_docx_file(request, protocol_id):
 @permission_classes([IsAuthenticated])
 def preview_protocol_pdf_file(request, protocol_id):
     temp_dir = None
+    docx_dir = None
 
     try:
         protocol = Protocol.objects.filter(pk=protocol_id).first()
@@ -2992,8 +2963,14 @@ def preview_protocol_pdf_file(request, protocol_id):
         if not user_can_access_protocol(request, protocol):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
-        docx_path = generate_protocol_docx(protocol)
+        # Предпросмотр собирается во временной папке, DOCX протокола не трогаем.
+        docx_dir = Path(tempfile.mkdtemp(prefix='protocol_docx_'))
+        docx_path = generate_protocol_docx(
+            protocol,
+            output_path=docx_dir / f'{protocol_folder_name(protocol)}.docx',
+        )
         temp_dir, pdf_path = convert_docx_to_pdf(docx_path)
+        shutil.rmtree(docx_dir, ignore_errors=True)
 
         response = FileResponse(
             open(pdf_path, 'rb'),
@@ -3006,6 +2983,8 @@ def preview_protocol_pdf_file(request, protocol_id):
         )
         return response
     except FileNotFoundError as error:
+        if docx_dir:
+            shutil.rmtree(docx_dir, ignore_errors=True)
         if temp_dir:
             cleanup_pdf_preview(temp_dir)
         logger.warning('Protocol PDF preview is unavailable: %s', error)
@@ -3014,6 +2993,8 @@ def preview_protocol_pdf_file(request, protocol_id):
             status=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
     except Exception:
+        if docx_dir:
+            shutil.rmtree(docx_dir, ignore_errors=True)
         if temp_dir:
             cleanup_pdf_preview(temp_dir)
         logger.exception('Unhandled exception in protocol PDF preview')

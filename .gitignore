@@ -177,4 +177,5 @@ cython_debug/
 
 main/media/generated_protocols/
 main/media/protocol_photos/
+main/media/protocols/
 .vscode/settings.json
