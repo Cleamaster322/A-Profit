@@ -1,4 +1,10 @@
 const GRAVITY = 9.8;
+// Масса Drom — для пустой ТС; для сравнения с нагрузкой на оси добавляем по 75 кг на место.
+const PASSENGER_MASS_KG = 75;
+// Расчетная масса (по осям) должна быть на 1–5 % меньше массы Drom с учетом мест.
+const CALCULATED_MASS_MIN_SHARE = 0.95;
+const CALCULATED_MASS_MAX_SHARE = 0.99;
+const MASS_EPSILON = 1e-9;
 
 function parseMeasurement(value) {
   if (value === null || value === undefined) return null;
@@ -19,15 +25,24 @@ function getCalculatedAxleMassKg(form) {
   return axle1 === null || axle2 === null ? null : axle1 + axle2;
 }
 
-function getVehicleMassKg(form, dromMassKg) {
-  const calculatedAxleMass = getCalculatedAxleMassKg(form);
-  if (calculatedAxleMass !== null && calculatedAxleMass !== 0) return calculatedAxleMass;
-  return parseMeasurement(dromMassKg);
+// «Кол-во мест» хранится по рядам: «2/3» = 5, «2/2/3» = 7, «2» = 2.
+export function countSeats(value) {
+  if (value === null || value === undefined) return null;
+  const parts = String(value).split("/").map((part) => part.trim());
+  if (!parts.length || !parts.every((part) => /^\d+$/.test(part))) return null;
+  return parts.reduce((total, part) => total + Number(part), 0);
 }
 
-function calcSpecificBrakeForce(form, forceFieldNames, dromMassKg) {
+function getDromFullMassKg(dromMassKg, seatsCount) {
+  const dromMass = parseMeasurement(dromMassKg);
+  const seats = countSeats(seatsCount);
+  return dromMass === null || seats === null ? null : dromMass + seats * PASSENGER_MASS_KG;
+}
+
+// Удельная тормозная сила считается только по нагрузкам на оси (они вводятся всегда).
+function calcSpecificBrakeForce(form, forceFieldNames) {
   const forceSum = sumAvailable(forceFieldNames.map((fieldName) => parseMeasurement(form[fieldName])));
-  const massKg = getVehicleMassKg(form, dromMassKg);
+  const massKg = getCalculatedAxleMassKg(form);
   if (forceSum === null || massKg === null || massKg === 0) return null;
 
   return forceSum / (massKg * GRAVITY / 1000);
@@ -44,20 +59,36 @@ function calcRelativeDifference(leftValue, rightValue) {
   return 100 * (maximum - Math.min(left, right)) / maximum;
 }
 
+// Границы для расчетной массы: от 95 % до 99 % массы Drom с учетом мест (включительно).
+function getCalculatedMassRange(fullMassKg) {
+  if (fullMassKg === null) return null;
+  return {
+    min: fullMassKg * CALCULATED_MASS_MIN_SHARE,
+    max: fullMassKg * CALCULATED_MASS_MAX_SHARE,
+  };
+}
+
+// 950 → «950», 1377.5 → «1377,5».
+export function formatMassKg(value) {
+  return String(Math.round(value * 100) / 100).replace(".", ",");
+}
+
 export function calculateBrakeMetrics(form, dromMassKg = form.vehicle_weight_kg) {
   return {
     dromMassKg: parseMeasurement(dromMassKg),
+    dromFullMassKg: getDromFullMassKg(dromMassKg, form.seats_count),
+    calculatedMassRange: getCalculatedMassRange(getDromFullMassKg(dromMassKg, form.seats_count)),
     calculatedAxleMassKg: getCalculatedAxleMassKg(form),
     serviceSpecificForce: calcSpecificBrakeForce(form, [
       "service_brake_front_left_kn",
       "service_brake_front_right_kn",
       "service_brake_rear_left_kn",
       "service_brake_rear_right_kn",
-    ], dromMassKg),
+    ]),
     parkingSpecificForce: calcSpecificBrakeForce(form, [
       "parking_brake_left_kn",
       "parking_brake_right_kn",
-    ], dromMassKg),
+    ]),
     axle1DifferencePct: calcRelativeDifference(
       form.service_brake_front_left_kn,
       form.service_brake_front_right_kn,
@@ -69,12 +100,15 @@ export function calculateBrakeMetrics(form, dromMassKg = form.vehicle_weight_kg)
   };
 }
 
+// Drom дает массу пустой ТС, поэтому нагрузку на оси сравниваем с массой Drom + места * 75 кг:
+// расчетная масса должна быть на 1–5 % меньше. Без массы Drom или мест проверка пропускается.
 export function getDromMassComparisonError(form, dromMassKg = form.vehicle_weight_kg) {
-  const dromMass = parseMeasurement(dromMassKg);
+  const range = getCalculatedMassRange(getDromFullMassKg(dromMassKg, form.seats_count));
   const calculatedMass = getCalculatedAxleMassKg(form);
-  if (dromMass === null || calculatedMass === null || calculatedMass <= dromMass) return "";
+  if (range === null || calculatedMass === null) return "";
+  if (calculatedMass >= range.min - MASS_EPSILON && calculatedMass <= range.max + MASS_EPSILON) return "";
 
-  return `Суммарная нагрузка на оси (${calculatedMass.toFixed(2)} кг) превышает массу Drom (${dromMass.toFixed(2)} кг). Уменьшите нагрузку на оси.`;
+  return `Расчетная масса ${formatMassKg(calculatedMass)} кг вне диапазона ${formatMassKg(range.min)}–${formatMassKg(range.max)} кг (на 1–5 % меньше массы Drom с учетом мест).`;
 }
 
 export function validateBrakeMetrics(form, dromMassKg = form.vehicle_weight_kg) {

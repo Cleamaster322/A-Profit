@@ -1,17 +1,19 @@
 """
 Файлы протоколов на диске.
 
-Структура: <корень>/<номер>/<номер>.docx и <корень>/<номер>/photos/<тип>_<uuid>.<расширение>.
+Структура: <корень>/<номер> <VIN> <дата создания>/<номер> <документ>.docx
+и <корень>/<папка>/photos/<название фото>.<расширение>.
 Корней два — «В работе» и «Завершённые» (ProtocolStorageSettings). В какой из них
-сейчас лежит папка протокола, хранит Protocol.files_location. У фото в БД путь
-относительно корня (00001/photos/...), поэтому при переносе папки меняется только
-files_location.
+сейчас лежит папка протокола, хранит Protocol.files_location, имя папки —
+Protocol.files_folder. У фото в БД путь относительно папки протокола (photos/...),
+поэтому при переносе или переименовании папки записи о фото не меняются.
 """
 import os
 import re
 import shutil
 import tempfile
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
@@ -113,7 +115,8 @@ def validate_storage_dirs(in_progress_dir, completed_dir):
 # Папка протокола
 # =========================
 
-def protocol_folder_name(protocol):
+def protocol_number_label(protocol):
+    """Номер протокола для имён папки и файлов; без номера — id с ведущими нулями."""
     number = (protocol.protocol_number or '').strip()
 
     if (
@@ -127,24 +130,90 @@ def protocol_folder_name(protocol):
     return str(protocol.id).zfill(5)
 
 
+def _created_date(protocol):
+    # Дата по часам сервера (TIME_ZONE в настройках — UTC, а лаборатория во Владивостоке).
+    created = getattr(protocol, 'created_at', None)
+    if created is None:
+        return datetime.now().date()
+    return created.astimezone().date() if created.tzinfo else created.date()
+
+
+def desired_protocol_folder_name(protocol):
+    """Имя папки по данным протокола: «<номер> <VIN> <дата создания>», без VIN — «<номер> <дата>»."""
+    parts = [protocol_number_label(protocol)]
+
+    vin = INVALID_FOLDER_CHARS.sub('_', (getattr(protocol, 'vin', None) or '').strip()).strip(' .')
+    if vin and vin != '-':
+        parts.append(vin)
+
+    parts.append(_created_date(protocol).strftime('%d.%m.%Y'))
+    return ' '.join(parts)
+
+
+def protocol_folder_name(protocol):
+    """Текущее имя папки протокола на диске."""
+    return getattr(protocol, 'files_folder', '') or desired_protocol_folder_name(protocol)
+
+
 def protocol_dir(protocol, location=None):
     return get_root(location or protocol.files_location) / protocol_folder_name(protocol)
 
 
 def create_protocol_dir(protocol):
+    """Фиксирует имя папки у нового протокола и создаёт папку."""
+    protocol.files_folder = desired_protocol_folder_name(protocol)
+    protocol.save(update_fields=['files_folder'])
     protocol_dir(protocol).mkdir(parents=True, exist_ok=True)
+
+
+def sync_protocol_folder(protocol):
+    """
+    Переименовывает папку протокола, если поменялся VIN (или номер).
+
+    Возвращает текст предупреждения, если переименовать не удалось: папка с таким
+    именем уже есть или файл открыт. Тогда файлы остаются в старой папке, а попытка
+    повторится при следующем сохранении, формировании документов или утверждении.
+    """
+    desired = desired_protocol_folder_name(protocol)
+    current = getattr(protocol, 'files_folder', '')
+
+    if current == desired:
+        return None
+
+    root = get_root(protocol.files_location)
+    source = root / current if current else None
+    target = root / desired
+
+    if source is not None and source.exists():
+        same_folder = os.path.normcase(str(source)) == os.path.normcase(str(target))
+
+        if target.exists() and not same_folder:
+            return (
+                f'Папка «{desired}» уже существует, поэтому папка протокола не переименована. '
+                f'Файлы остались в «{current}».'
+            )
+
+        try:
+            os.rename(source, target)
+        except OSError as error:
+            return (
+                f'Не удалось переименовать папку «{current}» в «{desired}» '
+                f'(возможно, открыт файл из неё): {error}. Файлы остались в старой папке.'
+            )
+
+    protocol.files_folder = desired
+    protocol.save(update_fields=['files_folder'])
+    return None
 
 
 def protocol_document_path(protocol, title):
     """Документ протокола: <папка>/<номер> <название>.docx, например «00012 Заявка.docx»."""
-    folder_name = protocol_folder_name(protocol)
-    return protocol_dir(protocol) / f'{folder_name} {title}.docx'
+    return protocol_dir(protocol) / f'{protocol_number_label(protocol)} {title}.docx'
 
 
 def legacy_protocol_docx_path(protocol):
     """Старое имя DOCX протокола (<номер>.docx) — удаляется после нового формирования."""
-    folder_name = protocol_folder_name(protocol)
-    return protocol_dir(protocol) / f'{folder_name}.docx'
+    return protocol_dir(protocol) / f'{protocol_number_label(protocol)}.docx'
 
 
 def _move_dir(protocol, source_location, target_location):
@@ -216,7 +285,7 @@ def remove_dirs(paths):
 # =========================
 
 def _protocol_file_storage(protocol):
-    return FileSystemStorage(location=str(get_root(protocol.files_location)))
+    return FileSystemStorage(location=str(protocol_dir(protocol)))
 
 
 def photo_file_stem(title):
@@ -228,14 +297,11 @@ def photo_file_stem(title):
 def save_photo_file(protocol, title, uploaded_file):
     """
     Сохраняет фото в папку протокола под именем «<название>.<расширение>»
-    и возвращает путь относительно корня. Файл с таким именем перезаписывается.
+    и возвращает путь относительно папки протокола (photos/...).
+    Файл с таким именем перезаписывается.
     """
     extension = Path(uploaded_file.name).suffix.lower()
-    relative_path = str(
-        PurePosixPath(protocol_folder_name(protocol))
-        / PHOTOS_DIR
-        / f'{photo_file_stem(title)}{extension}'
-    )
+    relative_path = str(PurePosixPath(PHOTOS_DIR) / f'{photo_file_stem(title)}{extension}')
 
     storage = _protocol_file_storage(protocol)
     if storage.exists(relative_path):
@@ -259,7 +325,7 @@ def photo_absolute_path(photo, protocol=None):
         return Path(settings.MEDIA_ROOT) / file_path
 
     protocol = protocol or photo.protocol
-    return get_root(protocol.files_location) / file_path
+    return protocol_dir(protocol) / file_path
 
 
 def delete_photo_file(photo, protocol=None):

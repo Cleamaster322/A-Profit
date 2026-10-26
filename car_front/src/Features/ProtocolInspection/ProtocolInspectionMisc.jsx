@@ -6,6 +6,7 @@ import Checkbox from "@mui/material/Checkbox";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 import {calculateMeasuredSpeedKmh} from "./speedCalculations.js";
+import {isElectricVehicle} from "./electricVehicleFields.js";
 
 function ProtocolInspectionMisc({
                                     form,
@@ -18,6 +19,7 @@ function ProtocolInspectionMisc({
                                     subsectionTitleSx,
                                 }) {
     const measuredSpeedKmh = calculateMeasuredSpeedKmh(form.speed_by_speedometer_kmh);
+    const electric = isElectricVehicle(form);
 
     return (
         <Paper sx={sectionPaperSx}>
@@ -240,13 +242,18 @@ function ProtocolInspectionMisc({
             </Typography>
 
             <Grid container spacing={2} sx={{mb: 3}}>
-                {renderField({
+                {/* По таблице диапазонов скорость задают только 20 или 25 км/ч. */}
+                {renderSelect({
                     form,
                     handleChange,
-                    textFieldSx,
+                    selectFieldSx,
                     label: "Заданная скорость по спидометру, км/ч",
                     name: "speed_by_speedometer_kmh",
                     md: 6,
+                    options: [
+                        {value: "20", label: "20"},
+                        {value: "25", label: "25"},
+                    ],
                 })}
 
                 <Grid size={{xs: 12, md: 6}}>
@@ -261,107 +268,112 @@ function ProtocolInspectionMisc({
                 </Grid>
             </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Экология и шум
-            </Typography>
+            {/* У электромобиля нет выхлопа: экологию, шум и дымность не показываем. */}
+            {!electric && (
+                <>
+                <Typography variant="h6" sx={subsectionTitleSx}>
+                    Экология и шум
+                </Typography>
 
-            <Grid container spacing={2} sx={{mb: 3}}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Шум на повышенных оборотах, дБА",
-                    name: "exhaust_noise_constant_db",
-                    md: 6,
-                })}
+                <Grid container spacing={2} sx={{mb: 3}}>
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Шум на повышенных оборотах, дБА",
+                        name: "exhaust_noise_constant_db",
+                        md: 6,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Шум в режиме замедления, дБА",
-                    name: "exhaust_noise_deceleration_db",
-                    md: 6,
-                })}
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Шум в режиме замедления, дБА",
+                        name: "exhaust_noise_deceleration_db",
+                        md: 6,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Min обороты: CO, %",
-                    name: "co_min_pct",
-                    md: 6,
-                })}
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Min обороты: CO, %",
+                        name: "co_min_pct",
+                        md: 6,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Max обороты: CO, %",
-                    name: "co_max_pct",
-                    md: 6,
-                })}
-            </Grid>
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Max обороты: CO, %",
+                        name: "co_max_pct",
+                        md: 6,
+                    })}
+                </Grid>
 
-            <Typography variant="h6" sx={subsectionTitleSx}>
-                Коэффициент поглощения света
-            </Typography>
+                <Typography variant="h6" sx={subsectionTitleSx}>
+                    Коэффициент поглощения света
+                </Typography>
 
-            <Grid container spacing={2} sx={{mb: 3}}>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Значение 1, м-1",
-                    name: "light_absorption_1",
-                    md: 2,
-                })}
+                <Grid container spacing={2} sx={{mb: 3}}>
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Значение 1, м-1",
+                        name: "light_absorption_1",
+                        md: 2,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Значение 2, м-1",
-                    name: "light_absorption_2",
-                    md: 2,
-                })}
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Значение 2, м-1",
+                        name: "light_absorption_2",
+                        md: 2,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Значение 3, м-1",
-                    name: "light_absorption_3",
-                    md: 2,
-                })}
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Значение 3, м-1",
+                        name: "light_absorption_3",
+                        md: 2,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Значение 4, м-1",
-                    name: "light_absorption_4",
-                    md: 2,
-                })}
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Значение 4, м-1",
+                        name: "light_absorption_4",
+                        md: 2,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Значение 5, м-1",
-                    name: "light_absorption_5",
-                    md: 2,
-                })}
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Значение 5, м-1",
+                        name: "light_absorption_5",
+                        md: 2,
+                    })}
 
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Значение 6, м-1",
-                    name: "light_absorption_6",
-                    md: 2,
-                })}
-            </Grid>
+                    {renderField({
+                        form,
+                        handleChange,
+                        textFieldSx,
+                        label: "Значение 6, м-1",
+                        name: "light_absorption_6",
+                        md: 2,
+                    })}
+                </Grid>
+                </>
+            )}
 
             {!measurementMode && <Typography variant="h6" sx={subsectionTitleSx}>
                 Габаритные размеры ТС

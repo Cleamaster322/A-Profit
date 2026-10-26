@@ -71,9 +71,10 @@ from .services.protocol_storage import (
     photo_absolute_path,
     protocol_file_dirs,
     protocol_files_moved_to,
-    protocol_folder_name,
+    protocol_number_label,
     remove_dirs,
     save_photo_file,
+    sync_protocol_folder,
 )
 from .services.protocol_pdf import cleanup_pdf_preview, convert_docx_to_pdf
 from .word_utils import create_car_word_doc
@@ -1542,9 +1543,14 @@ def update_protocol(request, pk):
                 protocol.locked_at = None
                 protocol.save(update_fields=['locked_by', 'locked_at'])
 
+            # VIN входит в имя папки: при его смене папка переименовывается.
+            files_warning = sync_protocol_folder(protocol)
+            if files_warning:
+                logger.warning('Protocol %s folder was not renamed: %s', protocol.id, files_warning)
+
             notify_protocol_status_changed(protocol)
 
-            return Response(ProtocolSerializer(protocol).data)
+            return Response({**ProtocolSerializer(protocol).data, 'files_warning': files_warning})
 
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
@@ -1951,6 +1957,14 @@ def approve_protocol(request, pk):
                 {'detail': 'Утвердить протокол может только руководитель или исполнительный директор.'},
                 status=status.HTTP_403_FORBIDDEN
             )
+
+        # Имя папки должно совпадать с VIN до переноса (если раньше не вышло).
+        # Вне транзакции: откат не вернёт переименованную на диске папку.
+        unlocked_protocol = Protocol.objects.filter(pk=pk).first()
+        if unlocked_protocol:
+            files_warning = sync_protocol_folder(unlocked_protocol)
+            if files_warning:
+                logger.warning('Protocol %s folder was not renamed: %s', pk, files_warning)
 
         with transaction.atomic():
             protocol = Protocol.objects.select_for_update().filter(pk=pk).first()
@@ -2931,6 +2945,7 @@ def generate_protocol_docx_file(request, protocol_id):
             'files': [path.name for path in result['files']],
             'skipped': result['skipped'],
             'errors': result['errors'],
+            'warnings': result['warnings'],
         }
 
         if result['errors']:
@@ -2967,7 +2982,7 @@ def preview_protocol_pdf_file(request, protocol_id):
         docx_dir = Path(tempfile.mkdtemp(prefix='protocol_docx_'))
         docx_path = generate_protocol_docx(
             protocol,
-            output_path=docx_dir / f'{protocol_folder_name(protocol)}.docx',
+            output_path=docx_dir / f'{protocol_number_label(protocol)} Протокол.docx',
         )
         temp_dir, pdf_path = convert_docx_to_pdf(docx_path)
         shutil.rmtree(docx_dir, ignore_errors=True)

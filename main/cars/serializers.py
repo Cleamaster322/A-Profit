@@ -7,6 +7,11 @@ from django.conf import settings
 from django.urls import reverse
 
 from .photo_slots import PHOTO_SLOT_TITLES, slot_photos
+from .services.protocol_docx.calculations import (
+    calc_axle_mass_range_kg,
+    calc_drom_full_mass_kg,
+    format_mass_kg,
+)
 from .models import (
     Brand,
     Model,
@@ -445,6 +450,8 @@ class ProtocolSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer)
             'id',
             'protocol_number',
             'status',
+            'files_location',
+            'files_folder',
             'user',
             'locked_by',
             'locked_at',
@@ -530,17 +537,29 @@ class ProtocolMeasurementSerializer(
                 ).first()
             drom_mass = car_data.vehicle_weight_kg if car_data else None
 
+        # Drom дает массу пустой ТС, а на оси ставят загруженную: расчетная масса
+        # (ось 1 + ось 2) должна быть на 1–5 % меньше массы Drom + места * 75 кг.
+        # Без массы Drom или мест проверка пропускается.
+        seats_count = attrs.get("seats_count", getattr(self.instance, "seats_count", None))
+        mass_range = calc_axle_mass_range_kg(calc_drom_full_mass_kg(drom_mass, seats_count))
+
+        # Проверяем, только когда в запросе есть нагрузки на оси (сохранение блока 7).
+        # Иначе ошибка массы всплывала бы при любом другом сохранении замеров,
+        # например в окне «Проверка данных автомобиля».
+        axles_in_request = "axle1_load_kg" in attrs or "axle2_load_kg" in attrs
         axle1_mass = attrs.get("axle1_load_kg", getattr(self.instance, "axle1_load_kg", None))
         axle2_mass = attrs.get("axle2_load_kg", getattr(self.instance, "axle2_load_kg", None))
-        if (
-            drom_mass is not None
-            and axle1_mass is not None
-            and axle2_mass is not None
-            and drom_mass < axle1_mass + axle2_mass
-        ):
-            raise serializers.ValidationError({
-                "axle1_load_kg": "Суммарная нагрузка на оси не может превышать массу Drom."
-            })
+        if axles_in_request and mass_range is not None and axle1_mass is not None and axle2_mass is not None:
+            calculated_mass = Decimal(str(axle1_mass)) + Decimal(str(axle2_mass))
+            min_mass, max_mass = mass_range
+            if not min_mass <= calculated_mass <= max_mass:
+                raise serializers.ValidationError({
+                    "axle1_load_kg": (
+                        f"Расчетная масса {format_mass_kg(calculated_mass)} кг вне диапазона "
+                        f"{format_mass_kg(min_mass)}–{format_mass_kg(max_mass)} кг "
+                        "(на 1–5 % меньше массы Drom с учетом мест)."
+                    )
+                })
 
         speedometer_speed = attrs.get(
             "speed_by_speedometer_kmh",
@@ -579,11 +598,11 @@ class ProtocolBrakeSerializer(
         )
         if parking_type == "mechanical_hand":
             rules["parking_brake_control_force_n"] = (
-                "0", "392", "Усилие на ручном органе управления стояночной тормозной системой", "Н"
+                "0", "373", "Усилие на ручном органе управления стояночной тормозной системой", "Н"
             )
         elif parking_type == "mechanical_pedal":
             rules["parking_brake_control_force_n"] = (
-                "0", "490", "Усилие на ножном органе управления стояночной тормозной системой", "Н"
+                "0", "465", "Усилие на ножном органе управления стояночной тормозной системой", "Н"
             )
         return rules
 
@@ -818,8 +837,10 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
             'owner_document',
             'owner_phone',
             'owner_legal_entity',
+            'owner_requisites',
             'manufacturer_info',
             'header_document_selections',
+            'header_documents_other',
 
             'appendix_number',
             'commercial_name',

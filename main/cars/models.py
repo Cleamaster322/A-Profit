@@ -218,6 +218,9 @@ class Protocol(DashFieldsMixin, models.Model):
         choices=FILES_LOCATION_CHOICES,
         default='in_progress',
     )
+    # Имя папки протокола на диске: «<номер> <VIN> <дата создания>» (services/protocol_storage.py).
+    # Хранится, чтобы при смене VIN найти старую папку и переименовать её.
+    files_folder = models.CharField(max_length=255, blank=True, default='')
     locked_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -287,10 +290,14 @@ class Protocol(DashFieldsMixin, models.Model):
     owner_phone = models.CharField(max_length=50, blank=True, null=True)
     # Юр. лицо заказчика (наименование, адреса) — свободный многострочный текст.
     owner_legal_entity = models.TextField(blank=True, null=True)
+    # Реквизиты заказчика — строка как ввели (запятые и пр. ставит пользователь).
+    owner_requisites = models.TextField(blank=True, null=True)
 
     # Изготовитель
     manufacturer_info = models.TextField(blank=True, null=True)
     header_document_selections = models.JSONField(default=list, blank=True)
+    # Текст галочки «Иное» в «Документы и сведения по отбору образца».
+    header_documents_other = models.TextField(blank=True, null=True)
 
     appendix_number = models.CharField(max_length=100, blank=True, null=True)
     commercial_name = models.CharField(max_length=255, blank=True, null=True)

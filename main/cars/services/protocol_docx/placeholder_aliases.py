@@ -62,7 +62,11 @@ def add_protocol_placeholder_aliases(context):
     if conclusion_source in context:
         aliases["a_8_13_2_conclusion"] = context[conclusion_source]
     if "applicable_6_4" in context:
-        aliases["a_6_4_conclusion"] = context["applicable_6_4"]
+        # Пункт не применяется — в заключении прочерк, текст причины остается в статусе.
+        status_6_4 = context["applicable_6_4"]
+        aliases["a_6_4_conclusion"] = (
+            "-" if str(status_6_4 or "").startswith("не применяется") else status_6_4
+        )
 
     for source_tag, canonical_tag in condition_aliases.items():
         source_match = CONDITION_TOKEN_RE.fullmatch(source_tag)

@@ -334,7 +334,7 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
             "a_23_1",
             "Соответствует требованиям\n"
             "ТР ТС 018/2011\n"
-            "Приложения N 8 п.9.9\n"
+            "Приложения № 8 п.9.9\n"
             "Требование: не более 96 дБА\n"
             "Результат при поддержании целевой частоты вращения: "
             f"{dynamic_values.get('exhaust_noise_constant_db', '-')} дБА ± "
@@ -348,7 +348,7 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
             "a_23_1",
             "Соответствует требованиям\n"
             "ТР ТС 018/2011\n"
-            "Приложения N 8 п.9.9\n"
+            "Приложения № 8 п.9.9\n"
             "Требование: не более 96 дБА\n"
             "Результат при поддержании целевой частоты вращения: "
             f"{dynamic_values.get('exhaust_noise_constant_db', '-')} дБА ± "

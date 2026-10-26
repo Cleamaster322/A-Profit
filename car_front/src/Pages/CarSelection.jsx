@@ -17,6 +17,10 @@ import Button from "@mui/material/Button";
 import Alert from "@mui/material/Alert";
 import Divider from "@mui/material/Divider";
 import {commonSx} from "../theme.js";
+import {
+    getProtocolTextFieldError,
+    normalizeProtocolTextField,
+} from "../Features/ProtocolInspection/protocolTextValidation.js";
 
 const pageSx = commonSx.page;
 const pageInnerSx = commonSx.pageInner;
@@ -96,8 +100,10 @@ function buildCreateProtocolPayload({
                                         selectedGeneration,
                                         selectedConfiguration,
                                         configurationFilters,
+                                        vin,
                                     }) {
     const payload = {
+        vin: vin.trim(),
         model: selectedModel?.id || null,
         brand_name: selectedBrand?.name || "",
         commercial_name: selectedModel?.name || "",
@@ -204,6 +210,9 @@ function CarSelection() {
     const [selectedConfiguration, setSelectedConfiguration] = useState(null);
 
     const [creatingProtocol, setCreatingProtocol] = useState(false);
+    // VIN обязателен при создании: он входит в имя папки протокола.
+    const [vin, setVin] = useState("");
+    const vinError = getProtocolTextFieldError("vin", vin);
     const [createProtocolError, setCreateProtocolError] = useState("");
 
     const [configurationFilterOptions, setConfigurationFilterOptions] = useState(
@@ -416,7 +425,7 @@ function CarSelection() {
     };
 
     const handleNextPage = async () => {
-        if (!selectedBrand || !selectedModel) return;
+        if (!selectedBrand || !selectedModel || !vin.trim() || vinError) return;
 
         try {
             setCreatingProtocol(true);
@@ -428,6 +437,7 @@ function CarSelection() {
                 selectedGeneration,
                 selectedConfiguration,
                 configurationFilters,
+                vin,
             });
 
             const response = await api.post("/cars/protocols/create/", payload);
@@ -557,6 +567,18 @@ function CarSelection() {
                                         sx={textFieldSx}
                                     />
                                 )}
+                            />
+
+                            <TextField
+                                label="VIN / № кузова / № шасси"
+                                value={vin}
+                                onChange={(event) =>
+                                    setVin(normalizeProtocolTextField("vin", event.target.value))
+                                }
+                                required
+                                error={Boolean(vinError)}
+                                helperText={vinError || " "}
+                                sx={textFieldSx}
                             />
                         </Box>
                     </Paper>
@@ -1165,7 +1187,11 @@ function CarSelection() {
                                 variant="contained"
                                 onClick={handleNextPage}
                                 disabled={
-                                    !selectedBrand || !selectedModel || creatingProtocol
+                                    !selectedBrand ||
+                                    !selectedModel ||
+                                    !vin.trim() ||
+                                    Boolean(vinError) ||
+                                    creatingProtocol
                                 }
                                 sx={blackButtonSx}
                             >

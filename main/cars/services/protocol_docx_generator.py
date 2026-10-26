@@ -10,6 +10,7 @@ from .protocol_storage import (
     protocol_dir,
     protocol_document_path,
     replace_file_atomically,
+    sync_protocol_folder,
 )
 from .protocol_word import count_word_pages
 
@@ -68,8 +69,17 @@ def generate_protocol_documents(protocol):
     if not protocol_template.exists():
         raise FileNotFoundError(f"Не найден шаблон протокола: {protocol_template}")
 
+    # Папка называется по VIN: если переименовать раньше не удалось, пробуем ещё раз.
+    folder_warning = sync_protocol_folder(protocol)
+
     base_context = build_document_context(protocol)
-    result = {"folder": protocol_dir(protocol), "files": [], "skipped": [], "errors": []}
+    result = {
+        "folder": protocol_dir(protocol),
+        "files": [],
+        "skipped": [],
+        "errors": [],
+        "warnings": [folder_warning] if folder_warning else [],
+    }
 
     for title, template_name, count_pages in PROTOCOL_DOCUMENTS:
         template_path = TEMPLATES_DIR / template_name

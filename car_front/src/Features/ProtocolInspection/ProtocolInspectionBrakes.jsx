@@ -9,7 +9,7 @@ import TableHead from "@mui/material/TableHead";
 import TableRow from "@mui/material/TableRow";
 import TextField from "@mui/material/TextField";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
-import {calculateBrakeMetrics, getDromMassComparisonError} from "./brakeCalculations.js";
+import {calculateBrakeMetrics, formatMassKg, getDromMassComparisonError} from "./brakeCalculations.js";
 
 function formatMetric(value) {
     return value === null ? "—" : value.toFixed(2).replace(".", ",");
@@ -199,8 +199,26 @@ function ProtocolInspectionBrakes({
             <Typography variant="h6" sx={subsectionTitleSx}>
                 Масса и нагрузка на ось
             </Typography>
+            <Grid container spacing={2} sx={{mb: 2}}>
+                {renderField({
+                    form,
+                    handleChange,
+                    textFieldSx,
+                    label: "Ось 1, кг",
+                    name: "axle1_load_kg",
+                    md: 6,
+                })}
+                {renderField({
+                    form,
+                    handleChange,
+                    textFieldSx,
+                    label: "Ось 2, кг",
+                    name: "axle2_load_kg",
+                    md: 6,
+                })}
+            </Grid>
             <Grid container spacing={2} sx={{mb: 3}}>
-                <Grid size={{xs: 12, md: 3}}>
+                <Grid size={{xs: 12, md: 4}}>
                     <TextField
                         id="drom_vehicle_weight_kg"
                         label="Масса Drom, кг"
@@ -210,34 +228,38 @@ function ProtocolInspectionBrakes({
                         sx={textFieldSx}
                     />
                 </Grid>
-                <Grid size={{xs: 12, md: 3}}>
+                <Grid size={{xs: 12, md: 4}}>
                     <TextField
-                        id="calculated_axle_mass_kg"
-                        label="Расчетная масса, кг"
-                        value={metrics.calculatedAxleMassKg === null ? "" : formatMetric(metrics.calculatedAxleMassKg)}
-                        error={Boolean(dromMassError)}
-                        helperText={dromMassError || (metrics.dromMassKg === null ? "Сравнение с массой Drom пропускается" : "")}
+                        id="drom_full_vehicle_weight_kg"
+                        label="Масса Drom + места × 75, кг"
+                        value={metrics.dromFullMassKg === null ? "" : formatMetric(metrics.dromFullMassKg)}
+                        helperText={
+                            metrics.dromFullMassKg === null
+                                ? "Нужны масса Drom и кол-во мест (блок 4)"
+                                : ""
+                        }
                         fullWidth
                         slotProps={{input: {readOnly: true}}}
                         sx={textFieldSx}
                     />
                 </Grid>
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Ось 1, кг",
-                    name: "axle1_load_kg",
-                    md: 3,
-                })}
-                {renderField({
-                    form,
-                    handleChange,
-                    textFieldSx,
-                    label: "Ось 2, кг",
-                    name: "axle2_load_kg",
-                    md: 3,
-                })}
+                <Grid size={{xs: 12, md: 4}}>
+                    <TextField
+                        id="calculated_axle_mass_kg"
+                        label="Расчетная масса, кг"
+                        value={metrics.calculatedAxleMassKg === null ? "" : formatMetric(metrics.calculatedAxleMassKg)}
+                        error={Boolean(dromMassError)}
+                        helperText={
+                            dromMassError ||
+                            (metrics.calculatedMassRange
+                                ? `Допустимо: ${formatMassKg(metrics.calculatedMassRange.min)}–${formatMassKg(metrics.calculatedMassRange.max)} кг`
+                                : "Сравнение с массой Drom пропускается")
+                        }
+                        fullWidth
+                        slotProps={{input: {readOnly: true}}}
+                        sx={textFieldSx}
+                    />
+                </Grid>
             </Grid>
 
             <Box sx={{mt: 3, overflowX: "auto"}}>

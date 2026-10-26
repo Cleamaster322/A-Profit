@@ -122,25 +122,66 @@ def expanded_uncertainty_from_relative_error(value, percent):
 
 def get_vehicle_mass_for_brake_calc(measurement):
     """
-    Масса для расчета удельной тормозной силы.
+    Масса для расчета удельной тормозной силы — сумма нагрузок на оси по весам.
 
-    Приоритет:
-    1) сумма нагрузок на ось по весам;
-    2) масса ТС;
-    3) None, если данных нет.
+    Нагрузки на оси вводятся всегда; без них расчет не делается (None).
+    Масса Drom сюда не идет: она для пустой машины.
     """
     axle_mass_kg = calc_axle_load_sum_kg(measurement)
     if axle_mass_kg is not None and axle_mass_kg != 0:
         return axle_mass_kg
 
-    vehicle_weight_kg = decimal_value(
-        get_value(measurement, "vehicle_weight_kg")
+    return None
+
+
+# Масса Drom — для пустой ТС; для сравнения с нагрузкой на оси добавляем по 75 кг на место.
+PASSENGER_MASS_KG = Decimal("75")
+
+
+def count_seats(value):
+    """
+    Количество мест из поля «Кол-во мест»: там места по рядам — «2/3» = 5, «2/2/3» = 7, «2» = 2.
+    Если разобрать не удалось — None.
+    """
+    if value is None:
+        return None
+
+    parts = [part.strip() for part in str(value).split("/")]
+    if not parts or not all(part.isdigit() for part in parts):
+        return None
+
+    return sum(int(part) for part in parts)
+
+
+# Расчетная масса (по осям) должна быть на 1–5 % меньше массы Drom с учетом мест.
+CALCULATED_MASS_MIN_SHARE = Decimal("0.95")
+CALCULATED_MASS_MAX_SHARE = Decimal("0.99")
+
+
+def calc_axle_mass_range_kg(drom_full_mass_kg):
+    """Допустимый диапазон расчетной массы: от 95 % до 99 % массы Drom с учетом мест."""
+    if drom_full_mass_kg is None:
+        return None
+    return (
+        drom_full_mass_kg * CALCULATED_MASS_MIN_SHARE,
+        drom_full_mass_kg * CALCULATED_MASS_MAX_SHARE,
     )
 
-    if vehicle_weight_kg is not None and vehicle_weight_kg != 0:
-        return vehicle_weight_kg
 
-    return None
+def format_mass_kg(value):
+    """1377.50 → «1377,5», 950.00 → «950»."""
+    return f"{value.quantize(Decimal('0.01')).normalize():f}".replace(".", ",")
+
+
+def calc_drom_full_mass_kg(drom_mass_kg, seats_count):
+    """Масса Drom + количество мест * 75 кг; None, если нет массы Drom или мест."""
+    drom_mass = decimal_value(drom_mass_kg)
+    seats = count_seats(seats_count)
+
+    if drom_mass is None or seats is None:
+        return None
+
+    return drom_mass + seats * PASSENGER_MASS_KG
 
 
 def calc_axle_load_sum_kg(measurement):
@@ -164,9 +205,7 @@ def calc_service_brake_specific_force(brake, measurement):
     F_sum — сумма тормозных сил, кН.
     W — вес ТС, кН.
 
-    Массу берем так:
-    1) axle1_load_kg + axle2_load_kg;
-    2) если нагрузок на оси нет — vehicle_weight_kg.
+    Масса — axle1_load_kg + axle2_load_kg.
     """
     brake_sum_kn = sum_decimal(
         get_value(brake, "service_brake_front_left_kn"),
@@ -194,9 +233,7 @@ def calc_parking_brake_specific_force(brake, measurement):
     F_sum — сумма тормозных сил, кН.
     W — вес ТС, кН.
 
-    Массу берем так:
-    1) axle1_load_kg + axle2_load_kg;
-    2) если нагрузок на оси нет — vehicle_weight_kg.
+    Масса — axle1_load_kg + axle2_load_kg.
     """
     brake_sum_kn = sum_decimal(
         get_value(brake, "parking_brake_left_kn"),
@@ -717,9 +754,7 @@ def calc_service_brake_specific_force_uncertainty(brake, measurement):
 
     U = 1.65 * u(R)
 
-    Массу берем так же, как в расчете:
-    1) axle1_load_kg + axle2_load_kg;
-    2) если нагрузок на оси нет — vehicle_weight_kg.
+    Масса — как в расчете: axle1_load_kg + axle2_load_kg.
     """
     forces_kn = [
         decimal_value(get_value(brake, "service_brake_front_left_kn")),
@@ -766,9 +801,7 @@ def calc_parking_brake_specific_force_uncertainty(brake, measurement):
 
     R = (P_left + P_right) / (m * g)
 
-    Массу берем так же, как в расчете:
-    1) axle1_load_kg + axle2_load_kg;
-    2) если нагрузок на оси нет — vehicle_weight_kg.
+    Масса — как в расчете: axle1_load_kg + axle2_load_kg.
     """
     forces_kn = [
         decimal_value(get_value(brake, "parking_brake_left_kn")),

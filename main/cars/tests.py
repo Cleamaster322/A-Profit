@@ -3,6 +3,7 @@ from decimal import Decimal
 from io import StringIO
 import os
 import re
+import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -39,6 +40,11 @@ from .serializers import (
 	ProtocolTestConditionSerializer,
 )
 from .services.protocol_docx.calculations import (
+	calc_axle_mass_range_kg,
+	calc_drom_full_mass_kg,
+	count_seats,
+	format_mass_kg,
+	get_vehicle_mass_for_brake_calc,
 	calc_light_absorption_uncertainty,
 	calc_axle_load_sum_kg,
 	standard_headlight_uncertainty_cd,
@@ -54,11 +60,13 @@ from .services.protocol_docx.calculations import (
 from .services.protocol_docx_generator import generate_protocol_docx
 from .services.protocol_storage import (
 	photo_file_stem,
-	protocol_folder_name,
+	protocol_number_label,
 	validate_storage_dirs,
 )
 from .services.protocol_docx.applicability import build_applicability_values
 from .services.protocol_docx.context import (
+	STATIC_CONCLUSIONS,
+	build_dash_conclusion_values,
 	build_protocol_docx_context,
 	build_submitted_documents,
 	build_light_device_row_values,
@@ -798,6 +806,33 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 			"Заявка, КУТС, ИЛ не несет ответственность за данные отбора образца.",
 		)
 
+	def test_application_documents_list_never_contains_application(self):
+		protocol = SimpleNamespace(header_document_selections=["kuts", "application", "tpo"])
+
+		self.assertEqual(build_submitted_documents(protocol), "Заявка, ТПО, КУТС")
+		self.assertEqual(build_submitted_documents(protocol, exclude={"application"}), "ТПО, КУТС")
+
+		only_application = SimpleNamespace(header_document_selections=["application"])
+		self.assertEqual(build_submitted_documents(only_application, exclude={"application"}), "")
+
+	def test_other_documents_text_goes_last_into_documents_list(self):
+		protocol = SimpleNamespace(
+			header_document_selections=["other", "application", "tpo"],
+			header_documents_other="  доверенность\nот 01.10.2026  ",
+		)
+
+		self.assertEqual(build_submitted_documents(protocol), "Заявка, ТПО, доверенность\nот 01.10.2026")
+		self.assertEqual(
+			build_submitted_documents(protocol, exclude={"application"}),
+			"ТПО, доверенность\nот 01.10.2026",
+		)
+
+		empty_other = SimpleNamespace(header_document_selections=["tpo", "other"], header_documents_other="  ")
+		self.assertEqual(build_submitted_documents(empty_other), "ТПО")
+
+		unchecked_other = SimpleNamespace(header_document_selections=["tpo"], header_documents_other="доверенность")
+		self.assertEqual(build_submitted_documents(unchecked_other), "ТПО")
+
 	def test_protocol_context_aliases_supply_template_fields(self):
 		placeholder_aliases, condition_aliases = load_placeholder_aliases()
 
@@ -817,9 +852,48 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 
 		add_protocol_placeholder_aliases(context)
 		self.assertEqual(context["a_8_13_2_conclusion"], "-")
-		self.assertEqual(context["a_6_4_conclusion"], context["applicable_6_4"])
+		# А.6.4 не применяется: причина в статусе, в заключении прочерк.
+		self.assertEqual(context["a_6_4_conclusion"], "-")
 		for canonical_name in placeholder_aliases.values():
 			self.assertIn(canonical_name, context)
+
+	def test_conclusions_are_dashed_for_not_applicable_and_electric_clauses(self):
+		electric_codes = (
+			"a_20_1", "a_20_2", "a_20_3", "a_20_5", "a_20_5_3", "a_20_6", "a_20_7", "a_20_8",
+			"a_21_4", "a_21_5", "a_21_6", "a_22_3", "a_22_4",
+		)
+		context = {
+			"applicable_18_4_2": "не применяется (на ТС отсутствуют выступающие элементы крыши из жесткого материала)",
+			"applicable_18_4_4": "соответствует",
+		}
+
+		electric = build_dash_conclusion_values(context, SimpleNamespace(fuel_type="electric"))
+		petrol = build_dash_conclusion_values(context, SimpleNamespace(fuel_type="petrol"))
+
+		self.assertEqual(electric["a_18_4_2_conclusion"], "-")
+		self.assertEqual(
+			petrol["a_18_4_4_conclusion"],
+			"Соответствует требованиям\nТР ТС 018/2011\nПриложение №4 п.3.4.4.4",
+		)
+		for code in electric_codes:
+			with self.subTest(code=code):
+				self.assertEqual(electric[f"{code}_conclusion"], "-")
+				self.assertTrue(petrol[f"{code}_conclusion"].startswith("Соответствует требованиям"))
+		self.assertEqual(
+			petrol["a_22_4_conclusion"],
+			"Соответствует требованиям\nТР ТС 018/2011\nПриложение №8 п.9.7",
+		)
+
+	def test_electric_vehicle_has_dash_in_21_9_conclusion(self):
+		values = build_eco_values(SimpleNamespace(), SimpleNamespace(fuel_type="electric", mileage_km=None))
+		self.assertEqual(values["full_result_a_21_9"], "-")
+
+	def test_template_has_placeholders_for_dashed_conclusions(self):
+		template = Path(__file__).parent / "templates" / "protocol_template.docx"
+		xml = re.sub(r"<[^>]+>", "", zipfile.ZipFile(template).read("word/document.xml").decode("utf-8"))
+		for code in STATIC_CONCLUSIONS:
+			with self.subTest(code=code):
+				self.assertIn(f"{{{{ {code}_conclusion }}}}", xml)
 
 	def test_missing_registration_number_marks_clause_1_2_1_not_applicable(self):
 		protocol = SimpleNamespace(registration_number=None)
@@ -863,16 +937,21 @@ class ProtocolFileStorageTests(TestCase):
 		self.protocol = Protocol.objects.create(
 			user=self.measurer,
 			protocol_number="00001",
+			vin="XW8ZZZ61ZEG000001",
 			status="measurement",
 			locked_by=self.measurer,
 			locked_at=timezone.now(),
 		)
+		# Папка «<номер> <VIN> <дата создания>», как при создании через сайт.
+		self.folder = f"00001 XW8ZZZ61ZEG000001 {timezone.now().astimezone().strftime('%d.%m.%Y')}"
+		self.protocol.files_folder = self.folder
+		self.protocol.save(update_fields=["files_folder"])
 
 	def post(self, path, data=None):
 		return self.client.post(path, data or {}, format="json")
 
 	def make_protocol_file(self, root, name="photos/old.jpg", content=b"old"):
-		path = root / "00001" / name
+		path = root / self.folder / name
 		path.parent.mkdir(parents=True, exist_ok=True)
 		path.write_bytes(content)
 		return path
@@ -888,12 +967,80 @@ class ProtocolFileStorageTests(TestCase):
 			format="multipart",
 		)
 
-	def test_created_protocol_gets_folder_in_progress(self):
+	def test_created_protocol_gets_folder_named_by_number_vin_and_date(self):
 		self.client.force_authenticate(user=self.measurer)
-		response = self.post("/cars/protocols/create/", {"owner_name": "Владелец"})
+		response = self.post("/cars/protocols/create/", {"owner_name": "Владелец", "vin": "JTDBR32E720123456"})
 
 		self.assertEqual(response.status_code, 201)
-		self.assertTrue((self.in_progress / response.data["protocol_number"]).is_dir())
+		today = timezone.now().astimezone().strftime("%d.%m.%Y")
+		folder = f"{response.data['protocol_number']} JTDBR32E720123456 {today}"
+		self.assertEqual(response.data["files_folder"], folder)
+		self.assertTrue((self.in_progress / folder).is_dir())
+
+	def test_vin_change_renames_protocol_folder(self):
+		self.upload_photo()
+		self.client.force_authenticate(user=self.measurer)
+		response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"vin": "NEWVIN0000000001"},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertIsNone(response.data["files_warning"])
+		new_folder = self.folder.replace("XW8ZZZ61ZEG000001", "NEWVIN0000000001")
+		self.assertEqual(response.data["files_folder"], new_folder)
+		self.assertFalse((self.in_progress / self.folder).exists())
+		self.assertTrue((self.in_progress / new_folder / "photos" / "Одометр.jpg").exists())
+
+		photo = ProtocolPhoto.objects.get(protocol=self.protocol)
+		file_response = self.client.get(f"/cars/protocol-photos/{photo.id}/file/")
+		self.assertEqual(file_response.status_code, 200)
+		file_response.close()
+
+	def test_vin_change_keeps_old_folder_when_target_exists(self):
+		self.make_protocol_file(self.in_progress)
+		new_folder = self.folder.replace("XW8ZZZ61ZEG000001", "NEWVIN0000000001")
+		(self.in_progress / new_folder).mkdir(parents=True)
+
+		self.client.force_authenticate(user=self.measurer)
+		response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"vin": "NEWVIN0000000001"},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.assertIn("уже существует", response.data["files_warning"])
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.vin, "NEWVIN0000000001")
+		self.assertEqual(self.protocol.files_folder, self.folder)
+		self.assertTrue((self.in_progress / self.folder / "photos" / "old.jpg").exists())
+
+	def test_files_folder_cannot_be_changed_through_api(self):
+		self.client.force_authenticate(user=self.measurer)
+		self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"files_folder": "..\hack", "files_location": "completed"},
+			format="json",
+		)
+
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.files_folder, self.folder)
+		self.assertEqual(self.protocol.files_location, "in_progress")
+
+	def test_relocate_command_renames_old_number_folders_by_vin(self):
+		Protocol.objects.filter(pk=self.protocol.pk).update(files_folder="00001")
+		old = self.in_progress / "00001" / "photos" / "old.jpg"
+		old.parent.mkdir(parents=True)
+		old.write_bytes(b"old")
+
+		call_command("relocate_protocol_files", stdout=StringIO())
+
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.files_folder, self.folder)
+		self.assertTrue((self.in_progress / self.folder / "photos" / "old.jpg").exists())
+		self.assertFalse((self.in_progress / "00001").exists())
 
 	def test_protocol_created_without_owner_name_keeps_it_empty(self):
 		self.client.force_authenticate(user=self.measurer)
@@ -916,14 +1063,28 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertEqual(self.protocol.owner_legal_entity, legal_entity)
 		self.assertEqual(build_protocol_docx_context(self.protocol)["owner_legal_entity"], legal_entity)
 
+	def test_owner_requisites_string_goes_to_docx_context_as_is(self):
+		requisites = "ОГРН 1234567890123, ИНН/КПП 2540000000/254001001,\nр/с 40702810000000000000"
+		self.client.force_authenticate(user=self.measurer)
+		response = self.client.patch(
+			f"/cars/protocols/{self.protocol.id}/update/",
+			{"owner_requisites": requisites},
+			format="json",
+		)
+
+		self.assertEqual(response.status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.owner_requisites, requisites)
+		self.assertEqual(build_protocol_docx_context(self.protocol)["owner_requisites"], requisites)
+
 	def test_uploaded_photo_goes_to_in_progress_folder_and_is_served(self):
 		response = self.upload_photo()
 
 		self.assertEqual(response.status_code, 201)
 		file_path = response.data["file_path"]
-		self.assertEqual(file_path, "00001/photos/Одометр.jpg")
+		self.assertEqual(file_path, "photos/Одометр.jpg")
 		self.assertEqual(response.data["caption"], "Одометр")
-		self.assertEqual((self.in_progress / file_path).read_bytes(), b"jpeg-bytes")
+		self.assertEqual((self.in_progress / self.folder / file_path).read_bytes(), b"jpeg-bytes")
 		self.assertEqual(
 			response.data["file_url"],
 			f"/cars/protocol-photos/{response.data['id']}/file/",
@@ -951,10 +1112,10 @@ class ProtocolFileStorageTests(TestCase):
 		second = self.upload_photo("stand_test_photo", "b.jpg", b"second").data
 		third = self.upload_photo("stand_test_photo", "c.jpg", b"third").data
 
-		self.assertEqual(first["file_path"], "00001/photos/Испытания на тормозном стенде.png")
-		self.assertFalse((self.in_progress / first["file_path"]).exists())
+		self.assertEqual(first["file_path"], "photos/Испытания на тормозном стенде.png")
+		self.assertFalse((self.in_progress / self.folder / first["file_path"]).exists())
 		self.assertEqual(second["file_path"], third["file_path"])
-		self.assertEqual((self.in_progress / third["file_path"]).read_bytes(), b"third")
+		self.assertEqual((self.in_progress / self.folder / third["file_path"]).read_bytes(), b"third")
 		self.assertEqual(ProtocolPhoto.objects.filter(protocol=self.protocol).count(), 1)
 
 	def test_only_photo_slots_are_accepted_and_listed(self):
@@ -1009,8 +1170,8 @@ class ProtocolFileStorageTests(TestCase):
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.status, "approved")
 		self.assertEqual(self.protocol.files_location, "completed")
-		self.assertFalse((self.in_progress / "00001").exists())
-		self.assertTrue((self.completed / "00001" / "photos").is_dir())
+		self.assertFalse((self.in_progress / self.folder).exists())
+		self.assertTrue((self.completed / self.folder / "photos").is_dir())
 		file_response = self.client.get(f"/cars/protocol-photos/{photo_id}/file/")
 		self.assertEqual(file_response.status_code, 200)
 		# Открытый файл на Windows не даст перенести папку.
@@ -1021,8 +1182,8 @@ class ProtocolFileStorageTests(TestCase):
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.status, "operator")
 		self.assertEqual(self.protocol.files_location, "in_progress")
-		self.assertFalse((self.completed / "00001").exists())
-		self.assertTrue((self.in_progress / "00001" / "photos").is_dir())
+		self.assertFalse((self.completed / self.folder).exists())
+		self.assertTrue((self.in_progress / self.folder / "photos").is_dir())
 
 	def test_approve_returns_folder_back_when_status_is_not_saved(self):
 		self.make_protocol_file(self.in_progress)
@@ -1036,8 +1197,8 @@ class ProtocolFileStorageTests(TestCase):
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.status, "review")
 		self.assertEqual(self.protocol.files_location, "in_progress")
-		self.assertTrue((self.in_progress / "00001" / "photos" / "old.jpg").exists())
-		self.assertFalse((self.completed / "00001").exists())
+		self.assertTrue((self.in_progress / self.folder / "photos" / "old.jpg").exists())
+		self.assertFalse((self.completed / self.folder).exists())
 
 	def test_approve_fails_without_merge_when_completed_folder_exists(self):
 		self.make_protocol_file(self.in_progress)
@@ -1051,8 +1212,8 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertIn("уже существует", response.data["detail"])
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.status, "review")
-		self.assertTrue((self.in_progress / "00001" / "photos" / "old.jpg").exists())
-		self.assertFalse((self.completed / "00001" / "photos").exists())
+		self.assertTrue((self.in_progress / self.folder / "photos" / "old.jpg").exists())
+		self.assertFalse((self.completed / self.folder / "photos").exists())
 
 	def test_cancelled_protocol_folder_stays_in_progress(self):
 		self.make_protocol_file(self.in_progress)
@@ -1063,7 +1224,7 @@ class ProtocolFileStorageTests(TestCase):
 
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.files_location, "in_progress")
-		self.assertTrue((self.in_progress / "00001" / "photos" / "old.jpg").exists())
+		self.assertTrue((self.in_progress / self.folder / "photos" / "old.jpg").exists())
 
 	def test_delete_protocol_removes_its_folder(self):
 		self.make_protocol_file(self.in_progress)
@@ -1072,7 +1233,7 @@ class ProtocolFileStorageTests(TestCase):
 		response = self.client.delete(f"/cars/protocols/{self.protocol.id}/delete/")
 
 		self.assertEqual(response.status_code, 204)
-		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertFalse((self.in_progress / self.folder).exists())
 		self.assertTrue(self.in_progress.is_dir())
 
 	def test_admin_clear_removes_only_protocol_folders(self):
@@ -1085,7 +1246,7 @@ class ProtocolFileStorageTests(TestCase):
 
 		clear_protocol_data()
 
-		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertFalse((self.in_progress / self.folder).exists())
 		self.assertTrue(unrelated.exists())
 
 	def make_document_templates(self, templates_dir, titles=("protocol", "application", "tech_record")):
@@ -1107,7 +1268,7 @@ class ProtocolFileStorageTests(TestCase):
 		templates_dir = self.temp / "templates"
 		templates_dir.mkdir()
 		self.make_document_templates(templates_dir)
-		legacy_docx = self.in_progress / "00001" / "00001.docx"
+		legacy_docx = self.in_progress / self.folder / "00001.docx"
 		legacy_docx.parent.mkdir(parents=True)
 		legacy_docx.write_bytes(b"old")
 		Protocol.objects.filter(pk=self.protocol.pk).update(
@@ -1118,7 +1279,7 @@ class ProtocolFileStorageTests(TestCase):
 		response, count_pages = self.generate_documents(templates_dir)
 
 		self.assertEqual(response.status_code, 200)
-		self.assertEqual(response.data["folder"], str(self.in_progress / "00001"))
+		self.assertEqual(response.data["folder"], str(self.in_progress / self.folder))
 		self.assertEqual(
 			response.data["files"],
 			["00001 Протокол.docx", "00001 Заявка.docx", "00001 Техзапись.docx"],
@@ -1127,11 +1288,11 @@ class ProtocolFileStorageTests(TestCase):
 		# Страницы через Word считаются только для протокола.
 		self.assertEqual(count_pages.call_count, 2)
 		self.assertEqual(
-			Document(self.in_progress / "00001" / "00001 Заявка.docx").paragraphs[0].text,
+			Document(self.in_progress / self.folder / "00001 Заявка.docx").paragraphs[0].text,
 			"application: 00001 ООО «Ромашка»",
 		)
 		self.assertEqual(
-			sorted(path.name for path in (self.in_progress / "00001").iterdir()),
+			sorted(path.name for path in (self.in_progress / self.folder).iterdir()),
 			["00001 Заявка.docx", "00001 Протокол.docx", "00001 Техзапись.docx"],
 		)
 
@@ -1156,7 +1317,7 @@ class ProtocolFileStorageTests(TestCase):
 		templates_dir = self.temp / "templates"
 		templates_dir.mkdir()
 		self.make_document_templates(templates_dir)
-		folder = self.in_progress / "00001"
+		folder = self.in_progress / self.folder
 		folder.mkdir(parents=True)
 		busy = folder / "00001 Заявка.docx"
 		busy.write_bytes(b"opened in word")
@@ -1194,11 +1355,11 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertEqual(build_protocol_docx_context(self.protocol)["applicant_name"], "ООО «Ромашка»")
 
 	def test_folder_name_falls_back_to_padded_id(self):
-		self.assertEqual(protocol_folder_name(SimpleNamespace(id=7, protocol_number="A-15")), "A-15")
+		self.assertEqual(protocol_number_label(SimpleNamespace(id=7, protocol_number="A-15")), "A-15")
 		for number in (None, "", "TEMP-abc", "12/34", "bad:name", "dot."):
 			with self.subTest(number=number):
 				self.assertEqual(
-					protocol_folder_name(SimpleNamespace(id=7, protocol_number=number)),
+					protocol_number_label(SimpleNamespace(id=7, protocol_number=number)),
 					"00007",
 				)
 
@@ -1238,29 +1399,29 @@ class ProtocolFileStorageTests(TestCase):
 		output = StringIO()
 		call_command("relocate_protocol_files", stdout=output)
 		moved.refresh_from_db()
-		self.assertEqual(moved.file_path, "00001/photos/other_1.jpg")
-		self.assertEqual((self.in_progress / moved.file_path).read_bytes(), b"legacy")
+		self.assertEqual(moved.file_path, "photos/other_1.jpg")
+		self.assertEqual((self.in_progress / self.folder / moved.file_path).read_bytes(), b"legacy")
 		self.assertFalse(legacy.exists())
 		self.assertIn(f"фото id={missing.id}", output.getvalue())
 
 	def test_relocate_command_creates_folders_for_protocols_without_files(self):
-		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertFalse((self.in_progress / self.folder).exists())
 
 		call_command("relocate_protocol_files", "--dry-run", stdout=StringIO())
-		self.assertFalse((self.in_progress / "00001").exists())
+		self.assertFalse((self.in_progress / self.folder).exists())
 
 		call_command("relocate_protocol_files", stdout=StringIO())
-		self.assertTrue((self.in_progress / "00001").is_dir())
+		self.assertTrue((self.in_progress / self.folder).is_dir())
 
 	def test_relocate_command_moves_folders_from_previous_root(self):
 		old_root = self.temp / "old_in_progress"
 		self.make_protocol_file(old_root)
-		photo = ProtocolPhoto.objects.create(protocol=self.protocol, file_path="00001/photos/old.jpg")
+		photo = ProtocolPhoto.objects.create(protocol=self.protocol, file_path="photos/old.jpg")
 
 		call_command("relocate_protocol_files", "--source", str(old_root), stdout=StringIO())
 
-		self.assertFalse((old_root / "00001").exists())
-		self.assertTrue((self.in_progress / photo.file_path).exists())
+		self.assertFalse((old_root / self.folder).exists())
+		self.assertTrue((self.in_progress / self.folder / photo.file_path).exists())
 
 
 class ProtocolApplicabilityTests(SimpleTestCase):
@@ -1634,7 +1795,7 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			(
 				"petrol",
 				"соответствует",
-				"Соответствует требованиям\nТР ТС 018/2011\nПриложения N 8 п.9.10",
+				"Соответствует требованиям\nТР ТС 018/2011\nПриложения № 8 п.9.10",
 			),
 		)
 
@@ -1666,7 +1827,7 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			(
 				"hydraulic",
 				"соответствует",
-				"Соответствует требованиям\nТР ТС 018/2011\nПриложения N 8 п.2.6",
+				"Соответствует требованиям\nТР ТС 018/2011\nПриложения № 8 п.2.6",
 			),
 		)
 
@@ -1701,7 +1862,7 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			(
 				True,
 				"соответствует",
-				"Соответствует требованиям\nТР ТС 018/2011\nПриложения N 8 п.10.7",
+				"Соответствует требованиям\nТР ТС 018/2011\nПриложения № 8 п.10.7",
 			),
 		)
 
@@ -1901,15 +2062,14 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 class ProtocolNumericRangeTests(SimpleTestCase):
 	def test_condition_serializer_reports_label_and_bounds(self):
 		serializer = ProtocolTestConditionSerializer(
-			data={"ambient_temperature_c": "22.1"},
+			data={"ambient_temperature_c": "21.1"},
 			partial=True,
 		)
 
 		self.assertFalse(serializer.is_valid())
 		message = str(serializer.errors["ambient_temperature_c"][0])
 		self.assertIn("Температура окружающей среды", message)
-		self.assertIn("18", message)
-		self.assertIn("22", message)
+		self.assertIn("от 19 до 21", message)
 		self.assertIn("°C", message)
 
 	def test_explicit_dash_or_empty_value_skips_range_check(self):
@@ -1923,41 +2083,97 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 		self.assertTrue(serializer.is_valid(), serializer.errors)
 
-	def test_drom_mass_equal_to_or_greater_than_axis_sum_is_valid(self):
-		for drom_mass in ("1240", "1300"):
-			with self.subTest(drom_mass=drom_mass):
+	def measurement_with_axles(self, axle1, axle2):
+		# 700 кг + 4 места (2/2) * 75 = 1000 кг → допустимо 950–990 кг.
+		return ProtocolMeasurementSerializer(
+			data={
+				"vehicle_weight_kg": "700",
+				"seats_count": "2/2",
+				"axle1_load_kg": axle1,
+				"axle2_load_kg": axle2,
+			},
+			partial=True,
+		)
+
+	def test_axis_sum_within_one_to_five_percent_below_full_mass_is_valid(self):
+		for axle2 in ("450", "470", "490"):
+			with self.subTest(axle2=axle2):
+				serializer = self.measurement_with_axles("500", axle2)
+				self.assertTrue(serializer.is_valid(), serializer.errors)
+
+	def test_axis_sum_outside_one_to_five_percent_is_rejected(self):
+		for axle2 in ("449", "491", "600"):
+			with self.subTest(axle2=axle2):
+				serializer = self.measurement_with_axles("500", axle2)
+				self.assertFalse(serializer.is_valid())
+				message = str(serializer.errors["axle1_load_kg"][0])
+				self.assertIn("950–990 кг", message)
+				self.assertIn("массы Drom с учетом мест", message)
+
+	def test_mass_range_is_checked_only_when_axles_are_in_request(self):
+		measurement = SimpleNamespace(
+			protocol=SimpleNamespace(configuration_id=None, tire_season=None),
+			vehicle_weight_kg=Decimal("700"),
+			seats_count="2/2",
+			axle1_load_kg=Decimal("500"),
+			axle2_load_kg=Decimal("600"),
+		)
+
+		without_axles = ProtocolMeasurementSerializer(
+			instance=measurement,
+			data={"seats_count": "2/2", "engine_model": "3ZR-FAE"},
+			partial=True,
+		)
+		self.assertTrue(without_axles.is_valid(), without_axles.errors)
+
+		with_axles = ProtocolMeasurementSerializer(
+			instance=measurement,
+			data={"axle2_load_kg": "600"},
+			partial=True,
+		)
+		self.assertFalse(with_axles.is_valid())
+		self.assertIn("950–990 кг", str(with_axles.errors["axle1_load_kg"][0]))
+
+	def test_mass_range_shows_fractional_bounds(self):
+		low, high = calc_axle_mass_range_kg(Decimal("1450"))
+		self.assertEqual((format_mass_kg(low), format_mass_kg(high)), ("1377,5", "1435,5"))
+
+	def test_missing_drom_mass_or_seats_skips_axis_sum_comparison(self):
+		for data in (
+			{"vehicle_weight_kg": None, "seats_count": "2/3"},
+			{"vehicle_weight_kg": "1000", "seats_count": None},
+		):
+			with self.subTest(data=data):
 				serializer = ProtocolMeasurementSerializer(
-					data={
-						"vehicle_weight_kg": drom_mass,
-						"axle1_load_kg": "740",
-						"axle2_load_kg": "500",
-					},
+					data={**data, "axle1_load_kg": "1740", "axle2_load_kg": "1500"},
 					partial=True,
 				)
 
 				self.assertTrue(serializer.is_valid(), serializer.errors)
 
-	def test_drom_mass_below_axis_sum_is_rejected(self):
-		serializer = ProtocolMeasurementSerializer(
-			data={
-				"vehicle_weight_kg": "1200",
-				"axle1_load_kg": "740",
-				"axle2_load_kg": "500",
-			},
-			partial=True,
+	def test_seats_are_summed_by_rows(self):
+		self.assertEqual(count_seats("2/3"), 5)
+		self.assertEqual(count_seats("2/2/3"), 7)
+		self.assertEqual(count_seats(" 2 / 3 "), 5)
+		self.assertEqual(count_seats("2"), 2)
+		self.assertIsNone(count_seats(""))
+		self.assertIsNone(count_seats(None))
+		self.assertIsNone(count_seats("5 мест"))
+		self.assertEqual(calc_drom_full_mass_kg("1000", "2/2/2"), Decimal("1450"))
+		self.assertIsNone(calc_drom_full_mass_kg(None, "2/3"))
+
+	def test_brake_mass_comes_only_from_axle_loads(self):
+		self.assertEqual(
+			get_vehicle_mass_for_brake_calc(
+				SimpleNamespace(axle1_load_kg="800", axle2_load_kg="600", vehicle_weight_kg="1000")
+			),
+			Decimal("1400"),
 		)
-
-		self.assertFalse(serializer.is_valid())
-		self.assertIn("axle1_load_kg", serializer.errors)
-		self.assertIn("превышать массу Drom", str(serializer.errors["axle1_load_kg"][0]))
-
-	def test_missing_drom_mass_skips_axis_sum_comparison(self):
-		serializer = ProtocolMeasurementSerializer(
-			data={"vehicle_weight_kg": None, "axle1_load_kg": "740", "axle2_load_kg": "500"},
-			partial=True,
+		self.assertIsNone(
+			get_vehicle_mass_for_brake_calc(
+				SimpleNamespace(axle1_load_kg=None, axle2_load_kg=None, vehicle_weight_kg="1000")
+			)
 		)
-
-		self.assertTrue(serializer.is_valid(), serializer.errors)
 
 	def test_power_supply_uses_excel_voltage_limits(self):
 		serializer = ProtocolPowerSupplySerializer(
@@ -1990,14 +2206,18 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 	def test_speedometer_range_and_actual_speed_calculation(self):
 		serializer = ProtocolMeasurementSerializer(
-			data={"actual_speed_kmh": "999", "speed_by_speedometer_kmh": "21"},
+			data={"actual_speed_kmh": "999", "speed_by_speedometer_kmh": "20"},
 			partial=True,
 		)
 
 		self.assertTrue(serializer.is_valid(), serializer.errors)
-		self.assertEqual(serializer.validated_data["actual_speed_kmh"], Decimal("20.0"))
+		self.assertEqual(serializer.validated_data["actual_speed_kmh"], Decimal("19.0"))
 
-		for invalid_speed in ("19.99", "30.01"):
+		accepted = ProtocolMeasurementSerializer(data={"speed_by_speedometer_kmh": "25.00"}, partial=True)
+		self.assertTrue(accepted.is_valid(), accepted.errors)
+
+		# По таблице диапазонов скорость по спидометру — только 20 или 25.
+		for invalid_speed in ("19.99", "21", "25.01", "30"):
 			with self.subTest(speedometer_speed=invalid_speed):
 				invalid = ProtocolMeasurementSerializer(
 					data={"speed_by_speedometer_kmh": invalid_speed},
@@ -2027,15 +2247,19 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 	def test_lighting_measurement_ranges_match_reference_table(self):
 		cases = (
-			("low_beam_upper_point_mm", "499.99"),
-			("low_beam_lower_point_mm", "1200.01"),
-			("fog_light_left_distance_mm", "400.01"),
-			("fog_light_upper_point_mm", "800.01"),
-			("left_34v_cd", "750.01"),
-			("left_52h_cd", "1599.99"),
-			("right_52h_cd", "150000.01"),
-			("left_high_beam_cd", "19999.99"),
-			("right_high_beam_cd", "150000.01"),
+			("low_beam_upper_point_mm", "500.99"),
+			("low_beam_lower_point_mm", "1199.01"),
+			("fog_light_left_distance_mm", "399.01"),
+			("fog_light_upper_point_mm", "250.99"),
+			("fog_light_upper_point_mm", "799.01"),
+			("left_34v_cd", "99.99"),
+			("left_34v_cd", "642.01"),
+			("left_52h_cd", "1899.99"),
+			("right_52h_cd", "110000.01"),
+			("left_high_beam_cd", "4999.99"),
+			("right_high_beam_cd", "112000.01"),
+			("brake_signal_upper_point_mm", "1499.01"),
+			("rear_fog_lower_point_mm", "250.99"),
 		)
 
 		for field_name, value in cases:
@@ -2046,10 +2270,15 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 	def test_steering_backlash_and_glass_transparency_ranges_match_reference_table(self):
 		cases = (
-			(ProtocolMeasurementSerializer, "steering_backlash_deg", "10.01"),
-			(ProtocolMeasurementSerializer, "glass_transparency_right_pct", "69.99"),
-			(ProtocolMeasurementSerializer, "glass_transparency_left_pct", "100.01"),
-			(ProtocolMeasurementSerializer, "glass_transparency_windshield_pct", "69.99"),
+			(ProtocolMeasurementSerializer, "steering_backlash_deg", "9.51"),
+			(ProtocolMeasurementSerializer, "glass_transparency_right_pct", "71.99"),
+			(ProtocolMeasurementSerializer, "glass_transparency_left_pct", "95.01"),
+			(ProtocolMeasurementSerializer, "glass_transparency_windshield_pct", "71.99"),
+			(ProtocolMeasurementSerializer, "co_min_pct", "0.30"),
+			(ProtocolMeasurementSerializer, "co_max_pct", "0.20"),
+			(ProtocolMeasurementSerializer, "exhaust_noise_constant_db", "94.01"),
+			(ProtocolMeasurementSerializer, "bumper_to_body_distance_mm", "19.01"),
+			(ProtocolMeasurementSerializer, "vehicle_length_mm", "8148.01"),
 		)
 
 		for serializer_class, field_name, value in cases:
@@ -2057,6 +2286,51 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 				serializer = serializer_class(data={field_name: value}, partial=True)
 				self.assertFalse(serializer.is_valid())
 				self.assertIn(field_name, serializer.errors)
+
+
+	def test_new_table_bounds_are_inclusive(self):
+		cases = (
+			(ProtocolTestConditionSerializer, {"ambient_temperature_c": "19", "relative_humidity_pct": "66", "atmospheric_pressure_kpa": "93"}),
+			(ProtocolMeasurementSerializer, {"axle1_load_kg": "0", "axle2_load_kg": "3500", "co_min_pct": "0.29", "glass_transparency_right_pct": "72"}),
+			(ProtocolLightSerializer, {"left_34v_cd": "100", "right_34v_cd": "642", "left_high_beam_cd": "5000", "fog_light_lower_point_mm": "251"}),
+		)
+		for serializer_class, data in cases:
+			with self.subTest(data=data):
+				serializer = serializer_class(data=data, partial=True)
+				self.assertTrue(serializer.is_valid(), serializer.errors)
+
+	def test_static_protocol_fields_are_not_range_checked(self):
+		# В протоколе эти данные статичны — проверок по ним нет.
+		self.assertTrue(ProtocolPowerSupplySerializer(data={"frequency_hz": "49"}, partial=True).is_valid())
+		self.assertTrue(ProtocolMeasurementSerializer(data={"vehicle_weight_kg": "100"}, partial=True).is_valid())
+		light = ProtocolLightSerializer(
+			data={"turn_signal_count": 3, "low_beam_count": 1, "main_brake_signal_count": 3},
+			partial=True,
+		)
+		self.assertTrue(light.is_valid(), light.errors)
+
+	def test_optional_lights_allow_zero_or_two(self):
+		for value, valid in ((0, True), (2, True), (1, False)):
+			with self.subTest(value=value):
+				serializer = ProtocolLightSerializer(
+					data={"daytime_running_light_count": value, "front_fog_count": value},
+					partial=True,
+				)
+				self.assertEqual(serializer.is_valid(), valid, serializer.errors)
+
+	def test_parking_control_force_limits_depend_on_control_type(self):
+		for parking_type, limit in (("mechanical_hand", "373"), ("mechanical_pedal", "465")):
+			with self.subTest(parking_type=parking_type):
+				ok = ProtocolBrakeSerializer(
+					data={"parking_brake_type": parking_type, "parking_brake_control_force_n": limit},
+					partial=True,
+				)
+				self.assertTrue(ok.is_valid(), ok.errors)
+				too_big = ProtocolBrakeSerializer(
+					data={"parking_brake_type": parking_type, "parking_brake_control_force_n": str(int(limit) + 1)},
+					partial=True,
+				)
+				self.assertFalse(too_big.is_valid())
 
 
 class ProtocolCalculationTests(TestCase):

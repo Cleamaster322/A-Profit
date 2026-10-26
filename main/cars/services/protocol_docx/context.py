@@ -31,6 +31,8 @@ HEADER_DOCUMENT_LABELS = {
     "bill_of_lading": "Коносамент",
     "kuts": "КУТС",
     "vehicle_manual": "Руководство по эксплуатации ТС",
+    # «Иное»: вместо подписи подставляется текст из поля header_documents_other.
+    "other": None,
     "sampling_data_disclaimer": "ИЛ не несет ответственность за данные отбора образца.",
 }
 
@@ -87,13 +89,21 @@ def build_manufacturer_info(protocol):
     return fmt_text(getattr(protocol, "manufacturer_info", None))
 
 
-def build_submitted_documents(protocol):
+def build_submitted_documents(protocol, exclude=()):
     selected = getattr(protocol, "header_document_selections", None) or []
-    return ", ".join(
-        label
-        for key, label in HEADER_DOCUMENT_LABELS.items()
-        if key in selected
-    )
+    other_text = (getattr(protocol, "header_documents_other", None) or "").strip()
+
+    parts = []
+    for key, label in HEADER_DOCUMENT_LABELS.items():
+        if key not in selected or key in exclude:
+            continue
+        if key == "other":
+            if other_text:
+                parts.append(other_text)
+            continue
+        parts.append(label)
+
+    return ", ".join(parts)
 
 
 def normalize_light_color(value):
@@ -385,229 +395,229 @@ CONCLUSIONS = {
         "Соответствует требованиям",
         "ТР ТС 018/2011",
         "Приложение № 3 п. 16.1;",
-        "Приложение №4 п.5.1",
+        "Приложение № 4 п.5.1",
     ),
 
     "a_6_5": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения №4 п.1.1.5",
+        "Приложения № 4 п.1.1.5",
     ),
 
     "a_8_1": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения №4 п. 1.3.1",
+        "Приложения № 4 п. 1.3.1",
         "(таблица 1.3.1)",
     ),
 
     "a_8_7": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.1.3.7",
+        "Приложения № 4 п.1.3.7",
     ),
 
     "a_8_10_1": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.1.3.10.1",
+        "Приложения № 4 п.1.3.10.1",
     ),
 
     "a_8_10_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.1.3.10.2",
+        "Приложения № 4 п.1.3.10.2",
     ),
 
     "a_8_10_3": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.1.3.10.3",
+        "Приложения № 4 п.1.3.10.3",
     ),
 
     "a_8_13_1": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.1.3.13.1",
+        "Приложения № 4 п.1.3.13.1",
     ),
 
     "a_8_13_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.1.3.13.2",
+        "Приложения № 4 п.1.3.13.2",
     ),
 
     "a_8_20_3": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.8.3",
+        "Приложения № 8 п.3.8.3",
     ),
 
     "a_8_20_8": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.8.8",
+        "Приложения № 8 п.3.8.8",
     ),
 
     "a_8_24_1": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.12.1",
+        "Приложения № 8 п.3.12.1",
     ),
 
     "a_8_24_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.12.2",
+        "Приложения № 8 п.3.12.2",
     ),
 
     "a_8_24_3": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.12.3",
+        "Приложения № 8 п.3.12.3",
     ),
 
     "a_8_25": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.13",
+        "Приложения № 8 п.3.13",
     ),
 
     "a_8_27": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.3.15",
+        "Приложения № 8 п.3.15",
     ),
 
     "a_10_5": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.5.5",
+        "Приложения № 8 п.5.5",
     ),
 
     "a_10_6": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.5.4",
+        "Приложения № 8 п.5.4",
     ),
 
     "a_10_7_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.5.6.2",
+        "Приложения № 8 п.5.6.2",
     ),
 
     "a_10_7_3": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.5.6.3",
+        "Приложения № 8 п.5.6.3",
     ),
 
     "a_11_8_sun_strip": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.4.3",
+        "Приложения № 8 п.4.3",
     ),
 
     "a_16_17": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.3.6.17",
+        "Приложения № 4 п.3.6.17",
     ),
 
     "a_18_5": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 4 п.3.4.4.5",
+        "Приложения № 4 п.3.4.4.5",
     ),
 
     "a_21_7": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения №8 п.9.1",
+        "Приложения № 8 п.9.1",
     ),
     "a_21_8": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения №8 п.9.2",
+        "Приложения № 8 п.9.2",
     ),
 
     "a_21_9": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения №8 п.9.3",
+        "Приложения № 8 п.9.3",
     ),
 
     "a_23_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.10",
+        "Приложения № 8 п.9.10",
     ),
 
     "a_24_6": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.2.6",
+        "Приложения № 8 п.2.6",
     ),
 
     "a_22_5_1": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.1",
+        "Приложения № 8 п.9.8.1",
     ),
 
     "a_22_5_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.2",
+        "Приложения № 8 п.9.8.2",
     ),
 
     "a_22_5_3": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.3",
+        "Приложения № 8 п.9.8.3",
     ),
 
     "a_22_5_4": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.4",
+        "Приложения № 8 п.9.8.4",
     ),
 
     "a_22_5_5": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.5",
+        "Приложения № 8 п.9.8.5",
     ),
 
     "a_22_5_6_1": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.6.1",
+        "Приложения № 8 п.9.8.6.1",
     ),
 
     "a_22_5_6_2": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.6.2",
+        "Приложения № 8 п.9.8.6.2",
     ),
 
     "a_22_5_6_3": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.9.8.6.3",
+        "Приложения № 8 п.9.8.6.3",
     ),
 
     "a_26_7": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.10.7",
+        "Приложения № 8 п.10.7",
     ),
 
     "a_26_12": conclusion_text(
         "Соответствует требованиям",
         "ТР ТС 018/2011",
-        "Приложения N 8 п.10.12",
+        "Приложения № 8 п.10.12",
     ),
 }
 
@@ -1585,11 +1595,75 @@ def build_eco_values(protocol, measurement):
         "full_result_a_21_9": (
             CONCLUSIONS["a_21_9"]
             if fuel_type != "electric" and (mileage is None or mileage >= 3000)
-            else "не применяется (ТС оборудовано только электродвигателем)"
-            if fuel_type == "electric"
             else "-"
         ),
     }
+
+
+# =========================
+# Заключения с прочерком
+# =========================
+
+def static_conclusion(appendix_item):
+    return conclusion_text("Соответствует требованиям", "ТР ТС 018/2011", appendix_item)
+
+
+# Заключения, которые раньше были вписаны в шаблон текстом; теперь там {{ a_..._conclusion }}.
+STATIC_CONCLUSIONS = {
+    "a_18_4_2": static_conclusion("Приложение №4 п.3.4.4.2"),
+    "a_18_4_4": static_conclusion("Приложение №4 п.3.4.4.4"),
+    "a_20_1": static_conclusion("Приложение №4 п.3.8.1"),
+    "a_20_2": static_conclusion("Приложение №4 п.3.8.2"),
+    "a_20_3": static_conclusion("Приложение №4 п.3.8.3"),
+    "a_20_5": static_conclusion("Приложение №4 п.3.8.4"),
+    "a_20_5_3": static_conclusion("Приложение №4 п.3.8.5.3"),
+    "a_20_6": static_conclusion("Приложение №4 п.3.8.6"),
+    "a_20_7": static_conclusion("Приложение №4 п.3.8.7"),
+    "a_20_8": static_conclusion("Приложение №4 п.3.8.8"),
+    "a_21_4": static_conclusion("Приложение № 4 п. 4.1.4"),
+    "a_21_5": static_conclusion("Приложение № 4 п. 4.1.5"),
+    "a_21_6": static_conclusion("Приложение № 4 п. 4.1.6"),
+    "a_22_3": static_conclusion("Приложение №8 п.9.6"),
+    "a_22_4": static_conclusion("Приложение №8 п.9.7"),
+}
+
+# Пункты, у которых заключение «-», пока статус «не применяется» (сейчас — всегда).
+DASH_WHEN_NOT_APPLICABLE = ("a_18_4_2", "a_18_4_4")
+
+# Пункты, у которых для электромобиля в заключении «-».
+DASH_WHEN_ELECTRIC = (
+    "a_20_1",
+    "a_20_2",
+    "a_20_3",
+    "a_20_5",
+    "a_20_5_3",
+    "a_20_6",
+    "a_20_7",
+    "a_20_8",
+    "a_21_4",
+    "a_21_5",
+    "a_21_6",
+    "a_22_3",
+    "a_22_4",
+)
+
+
+def is_not_applicable(status):
+    return str(status or "").startswith("не применяется")
+
+
+def build_dash_conclusion_values(context, measurement):
+    electric = getattr(measurement, "fuel_type", None) == "electric"
+    values = {}
+
+    for code in DASH_WHEN_NOT_APPLICABLE:
+        status = context.get(f"applicable_{code.removeprefix('a_')}")
+        values[f"{code}_conclusion"] = "-" if is_not_applicable(status) else STATIC_CONCLUSIONS[code]
+
+    for code in DASH_WHEN_ELECTRIC:
+        values[f"{code}_conclusion"] = "-" if electric else STATIC_CONCLUSIONS[code]
+
+    return values
 
 
 # =========================
@@ -1652,11 +1726,14 @@ def build_protocol_docx_context(protocol):
         "owner_address": fmt_text(protocol.owner_address),
         "owner_phone": fmt_text(protocol.owner_phone),
         "owner_legal_entity": fmt_text(getattr(protocol, "owner_legal_entity", None)),
+        "owner_requisites": fmt_text(getattr(protocol, "owner_requisites", None)),
         # Заявка, подпись «ФИО/Наименование юридического лица»: юр. лицо, если указано, иначе ФИО.
         "applicant_name": fmt_text(getattr(protocol, "owner_legal_entity", None))
         or fmt_text(build_owner_full_name(protocol)),
         "manufacturer_info": build_manufacturer_info(protocol),
         "submitted_documents": build_submitted_documents(protocol),
+        # Для самой Заявки: тот же список, но без «Заявки».
+        "application_submitted_documents": build_submitted_documents(protocol, exclude={"application"}),
         "inspection_place": fmt_text(protocol.inspection_place, DEFAULT_INSPECTION_PLACE),
 
         # =========================
@@ -2096,5 +2173,6 @@ def build_protocol_docx_context(protocol):
             context,
         )
     )
+    context.update(build_dash_conclusion_values(context, measurement))
 
     return context

@@ -243,8 +243,10 @@ For A.8.13.2, `applicable_8_13_2` is a legacy full-result value in the present-l
 {{ owner_full_name }} -> {{ owner_full_name }}
 {{ owner_address }} -> {{ owner_address }}
 {{ owner_legal_entity }} -> {{ owner_legal_entity }}
+{{ owner_requisites }} -> {{ owner_requisites }}
 {{ applicant_name }} -> {{ applicant_name }}
 {{ submitted_documents }} -> {{ submitted_documents }}
+{{ application_submitted_documents }} -> {{ application_submitted_documents }}
 {{ manufacturer_info }} -> {{ vehicle_manufacturer_info }}
 {{ brand_name }} -> {{ vehicle_brand_name }}
 {{ commercial_name }} -> {{ vehicle_model_name }}

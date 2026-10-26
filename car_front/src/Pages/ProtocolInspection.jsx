@@ -25,6 +25,7 @@ import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolIns
 import {calculateBrakeMetrics, validateBrakeMetrics} from "../Features/ProtocolInspection/brakeCalculations.js";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
 import ProtocolInspectionPhotos from "../Features/ProtocolInspection/ProtocolInspectionPhotos.jsx";
+import {withoutElectricHiddenFields} from "../Features/ProtocolInspection/electricVehicleFields.js";
 import {getProtocolPhotoSlots} from "../shared/protocolPhotoApi.jsx";
 import {
     applyProtocolDraft,
@@ -83,11 +84,6 @@ function normalizeCatalogReviewValue(key, value) {
         if (/v[- ]?образ|^v$/.test(text)) return "v_shape";
     }
 
-    if (key === "turbo_present") {
-        if (["true", "1", "yes", "да", "есть"].includes(text)) return "true";
-        if (["false", "0", "no", "нет", "отсутствует"].includes(text)) return "false";
-    }
-
     return value;
 }
 
@@ -122,8 +118,10 @@ const initialForm = {
     owner_full_name: "",
     owner_address: "",
     owner_legal_entity: "",
+    owner_requisites: "",
     manufacturer_info: "",
     header_document_selections: [],
+    header_documents_other: "",
 
     ambient_temp_c: "",
     ambient_humidity_pct: "",
@@ -323,6 +321,16 @@ function toFormValue(value, dashFields = [], apiFieldName = null) {
     return value;
 }
 
+// Десятичные поля приходят из API с двумя знаками ("1.50"), а варианты в списке — "1.5".
+// Без приведения выпадающий список не находит значение и выглядит пустым.
+function toDecimalOptionFormValue(value) {
+    if (value === "" || value === "-" || Number.isNaN(Number(value))) {
+        return value;
+    }
+
+    return String(Number(value));
+}
+
 function toLightCountFormValue(value, dashFields, apiFieldName) {
     if (value !== null && value !== undefined && Number(value) === 0) {
         return "";
@@ -493,6 +501,7 @@ const PROTOCOL_DASH_FIELDS = [
     {formField: "owner_full_name", apiField: "owner_name"},
     {formField: "owner_address", apiField: "owner_address"},
     {formField: "owner_legal_entity", apiField: "owner_legal_entity"},
+    {formField: "owner_requisites", apiField: "owner_requisites"},
     {formField: "manufacturer_info", apiField: "manufacturer_info"},
     {formField: "brand_name", apiField: "brand_name"},
     {formField: "commercial_name", apiField: "commercial_name"},
@@ -925,7 +934,9 @@ function mapProtocolToForm(data) {
         owner_full_name: toOwnerFullNameFormValue(protocol, protocolDashFields),
         owner_address: toFormValue(protocol.owner_address, protocolDashFields, "owner_address"),
         owner_legal_entity: toFormValue(protocol.owner_legal_entity, protocolDashFields, "owner_legal_entity"),
+        owner_requisites: toFormValue(protocol.owner_requisites, protocolDashFields, "owner_requisites"),
         manufacturer_info: toFormValue(protocol.manufacturer_info, protocolDashFields, "manufacturer_info"),
+        header_documents_other: protocol.header_documents_other || "",
         header_document_selections: Array.isArray(protocol.header_document_selections)
             ? protocol.header_document_selections
             : [],
@@ -1030,7 +1041,9 @@ function mapProtocolToForm(data) {
         right_52h_cd: toFormValue(light.right_52h_cd, lightDashFields, "right_52h_cd"),
         right_high_beam_cd: toFormValue(light.right_high_beam_cd, lightDashFields, "right_high_beam_cd"),
         turn_signal_frequency_per_min: toFormValue(light.turn_signal_frequency_per_min, lightDashFields, "turn_signal_frequency_per_min"),
-        turn_signal_frequency_hz: toFormValue(light.turn_signal_frequency_hz, lightDashFields, "turn_signal_frequency_hz"),
+        turn_signal_frequency_hz: toDecimalOptionFormValue(
+            toFormValue(light.turn_signal_frequency_hz, lightDashFields, "turn_signal_frequency_hz")
+        ),
 
         low_beam_upper_point_mm: toFormValue(light.low_beam_upper_point_mm, lightDashFields, "low_beam_upper_point_mm"),
         low_beam_lower_point_mm: toFormValue(light.low_beam_lower_point_mm, lightDashFields, "low_beam_lower_point_mm"),
@@ -1072,7 +1085,9 @@ function mapProtocolToForm(data) {
         glass_transparency_left_pct: toFormValue(measurement.glass_transparency_left_pct, measurementDashFields, "glass_transparency_left_pct"),
         glass_transparency_windshield_pct: toFormValue(measurement.glass_transparency_windshield_pct, measurementDashFields, "glass_transparency_windshield_pct"),
         sun_strip_width_mm: toFormValue(measurement.sun_strip_width_mm, measurementDashFields, "sun_strip_width_mm"),
-        speed_by_speedometer_kmh: toFormValue(measurement.speed_by_speedometer_kmh, measurementDashFields, "speed_by_speedometer_kmh"),
+        speed_by_speedometer_kmh: toDecimalOptionFormValue(
+            toFormValue(measurement.speed_by_speedometer_kmh, measurementDashFields, "speed_by_speedometer_kmh")
+        ),
         actual_speed_kmh: calculateMeasuredSpeedKmh(measurement.speed_by_speedometer_kmh),
         exhaust_noise_constant_db: toFormValue(measurement.exhaust_noise_constant_db, measurementDashFields, "exhaust_noise_constant_db"),
         exhaust_noise_deceleration_db: toFormValue(measurement.exhaust_noise_deceleration_db, measurementDashFields, "exhaust_noise_deceleration_db"),
@@ -1104,8 +1119,10 @@ function buildProtocolPayload(form) {
         owner_middle_name: null,
         owner_address: emptyToNull(form.owner_address) || "",
         owner_legal_entity: emptyToNull(form.owner_legal_entity),
+        owner_requisites: emptyToNull(form.owner_requisites),
         manufacturer_info: emptyToNull(form.manufacturer_info),
         header_document_selections: form.header_document_selections || [],
+        header_documents_other: emptyToNull(form.header_documents_other),
 
         brand_name: emptyToNull(form.brand_name),
         commercial_name: emptyToNull(form.commercial_name),
@@ -1774,7 +1791,9 @@ function ProtocolInspection({measurementMode = false}) {
 
     const handleSave = async (options = {}) => {
         const {showSuccessMessage = true} = options;
-        const activeForm = options.formOverride || form;
+        // Для электромобиля скрытые поля (ДВС, экология, шум, дымность) уходят пустыми,
+        // чтобы не проверялись и не попадали в документы.
+        const activeForm = withoutElectricHiddenFields(options.formOverride || form);
 
         try {
             setSaving(true);
@@ -1805,15 +1824,21 @@ function ProtocolInspection({measurementMode = false}) {
                 return false;
             }
 
+            // Сервер переименовывает папку протокола при смене VIN; если не вышло —
+            // присылает предупреждение, показываем его после сохранения.
+            let filesWarning = null;
+
             const saveSteps = [
                 {
                     key: "header",
                     ref: headerRef,
-                    request: () =>
-                        api.patch(
+                    request: async () => {
+                        const response = await api.patch(
                             `/cars/protocols/${protocolId}/update/`,
                             buildProtocolPayload(activeForm)
-                        ),
+                        );
+                        filesWarning = response.data?.files_warning || null;
+                    },
                 },
                 {
                     key: "conditions",
@@ -1895,6 +1920,10 @@ function ProtocolInspection({measurementMode = false}) {
                 setSuccessMessage("Протокол успешно сохранён");
             }
 
+            if (filesWarning) {
+                setErrorMessage(`Протокол сохранён, но: ${filesWarning}`);
+            }
+
             return true;
         } catch (error) {
             console.error("Ошибка сохранения:", error);
@@ -1918,6 +1947,16 @@ function ProtocolInspection({measurementMode = false}) {
         );
 
         if (!confirmed) {
+            return;
+        }
+
+        // Сначала сохраняем форму: иначе несохранённые изменения не уйдут вместе с протоколом.
+        // Если сохранение не прошло (ошибки в блоках), протокол не передаём.
+        const saved = await handleSave({
+            showSuccessMessage: false,
+        });
+
+        if (!saved) {
             return;
         }
 
@@ -1997,6 +2036,10 @@ function ProtocolInspection({measurementMode = false}) {
     // Итог формирования: папка, собранные файлы и документы без шаблона.
     const describeGeneratedDocuments = (data) => {
         const parts = [`Документы сохранены в папку ${data.folder}: ${data.files.join(", ")}.`];
+
+        if (data.warnings?.length) {
+            parts.push(data.warnings.join(" "));
+        }
 
         if (data.skipped?.length) {
             parts.push(`Не сформированы: ${data.skipped.join("; ")}.`);
@@ -2212,13 +2255,6 @@ function ProtocolInspection({measurementMode = false}) {
             formField: "cylinders_count",
         },
         {
-            key: "turbo_present",
-            label: "Турбонаддув",
-            catalog: catalogConfiguration?.turbo_present,
-            measured: form.turbo_present,
-            formField: "turbo_present",
-        },
-        {
             key: "vehicle_length_mm",
             label: "Длина по данным Drom, мм",
             catalog: catalogConfiguration?.vehicle_length_mm,
@@ -2307,7 +2343,6 @@ function ProtocolInspection({measurementMode = false}) {
                 engine_power_kw: "engine_power_kw",
                 cylinder_layout: "cylinder_layout",
                 cylinders_count: "cylinders_count",
-                turbo_present: "turbo_present",
                 vehicle_length_mm: "vehicle_length_mm",
                 vehicle_width_mm: "vehicle_width_mm",
                 vehicle_height_mm: "vehicle_height_mm",

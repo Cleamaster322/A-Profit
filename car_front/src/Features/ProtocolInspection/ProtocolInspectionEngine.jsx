@@ -2,6 +2,7 @@ import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
+import {isElectricVehicle} from "./electricVehicleFields.js";
 
 function ProtocolInspectionEngine({
                                       form,
@@ -13,6 +14,9 @@ function ProtocolInspectionEngine({
                                       sectionTitleSx,
                                       subsectionTitleSx,
                                   }) {
+    // У электромобиля нет ДВС: расположение, цилиндры и нагнетатель скрываем.
+    const electric = isElectricVehicle(form);
+
     return (
         <Paper sx={sectionPaperSx}>
             <Typography variant="h5" sx={sectionTitleSx}>
@@ -43,7 +47,7 @@ function ProtocolInspectionEngine({
                 })}
             </Grid>
 
-            <Grid container spacing={2} sx={{mb: 2}}>
+            {!electric && <Grid container spacing={2} sx={{mb: 2}}>
                 {renderSelect({
                     form,
                     handleChange,
@@ -70,10 +74,10 @@ function ProtocolInspectionEngine({
                         {value: "v_shape", label: "V-образное"},
                     ],
                 })}
-            </Grid>
+            </Grid>}
 
             <Grid container spacing={2}>
-                {renderSelect({
+                {!electric && renderSelect({
                     form,
                     handleChange,
                     selectFieldSx,
@@ -103,21 +107,18 @@ function ProtocolInspectionEngine({
                     ],
                 })}
 
-                {renderSelect({
+                {!electric && renderSelect({
                     form,
                     handleChange,
                     selectFieldSx,
-                    label: measurementMode ? "Нагнетатель" : "Турбонаддув",
-                    name: measurementMode ? "supercharger" : "turbo_present",
+                    label: "Нагнетатель",
+                    name: "supercharger",
                     md: 4,
-                    options: measurementMode ? [
+                    options: [
                         {value: "absent", label: "Отсутствует"},
                         {value: "compressor", label: "Компрессор"},
                         {value: "turbo", label: "Турбина"},
                         {value: "twin_turbo", label: "Твин-турбо"},
-                    ] : [
-                        {value: "true", label: "Наличие"},
-                        {value: "false", label: "Отсутствие"},
                     ],
                 })}
             </Grid>

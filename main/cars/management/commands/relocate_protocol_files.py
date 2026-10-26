@@ -11,10 +11,12 @@ from cars.services.protocol_storage import (
     IN_PROGRESS,
     PHOTOS_DIR,
     default_root,
+    desired_protocol_folder_name,
     get_root,
     is_legacy_photo_path,
     protocol_dir,
-    protocol_folder_name,
+    protocol_number_label,
+    sync_protocol_folder,
 )
 
 
@@ -22,17 +24,23 @@ def same_path(first, second):
     return os.path.normcase(os.path.abspath(first)) == os.path.normcase(os.path.abspath(second))
 
 
+def folder_name_candidates(protocol):
+    """Имена, под которыми папка протокола могла лежать раньше."""
+    names = [protocol.files_folder, desired_protocol_folder_name(protocol), protocol_number_label(protocol)]
+    return list(dict.fromkeys(name for name in names if name))
+
+
 class Command(BaseCommand):
     help = (
-        "Переносит файлы протоколов в папки из настроек: старые фото из media/protocol_photos "
-        "и папки протоколов из прежних корневых папок (--source, папки по умолчанию)."
+        "Приводит файлы протоколов к текущей схеме: папки «<номер> <VIN> <дата>», старые фото "
+        "из media/protocol_photos и папки из прежних корневых папок (--source, папки по умолчанию)."
     )
 
     def add_arguments(self, parser):
         parser.add_argument(
             "--dry-run",
             action="store_true",
-            help="Только показать, что будет перенесено.",
+            help="Только показать, что будет сделано.",
         )
         parser.add_argument(
             "--source",
@@ -52,11 +60,13 @@ class Command(BaseCommand):
         ]
 
         moved_dirs = self.move_protocol_dirs(source_roots)
+        renamed_dirs = self.rename_dirs()
         moved_photos, missing = self.move_photos(source_roots + current_roots)
         created_dirs = self.create_missing_dirs()
 
         prefix = "[dry-run] " if self.dry_run else ""
         self.stdout.write(f"{prefix}Перенесено папок протоколов: {moved_dirs}")
+        self.stdout.write(f"{prefix}Переименовано папок под VIN: {renamed_dirs}")
         self.stdout.write(f"{prefix}Перенесено фото: {moved_photos}")
         self.stdout.write(f"{prefix}Создано пустых папок протоколов: {created_dirs}")
 
@@ -83,18 +93,40 @@ class Command(BaseCommand):
         for protocol in Protocol.objects.all():
             target = protocol_dir(protocol)
             for root in source_roots:
-                source = root / protocol_folder_name(protocol)
-                if not source.is_dir():
-                    continue
-                if target.exists():
-                    self.stdout.write(self.style.WARNING(
-                        f"  Пропущено, папка уже есть: {source} -> {target}"
-                    ))
-                    continue
-                self.move(source, target)
-                moved += 1
+                for name in folder_name_candidates(protocol):
+                    source = root / name
+                    if not source.is_dir():
+                        continue
+                    if target.exists():
+                        self.stdout.write(self.style.WARNING(
+                            f"  Пропущено, папка уже есть: {source} -> {target}"
+                        ))
+                        continue
+                    self.move(source, target)
+                    moved += 1
 
         return moved
+
+    def rename_dirs(self):
+        renamed = 0
+
+        for protocol in Protocol.objects.all():
+            desired = desired_protocol_folder_name(protocol)
+            if protocol.files_folder == desired:
+                continue
+
+            self.stdout.write(f"  переименовать «{protocol.files_folder}» -> «{desired}»")
+            if self.dry_run:
+                renamed += 1
+                continue
+
+            warning = sync_protocol_folder(protocol)
+            if warning:
+                self.stdout.write(self.style.WARNING(f"  {warning}"))
+            else:
+                renamed += 1
+
+        return renamed
 
     def create_missing_dirs(self):
         # Папка нужна каждому протоколу, даже без фото и DOCX (например, у замерщика).
@@ -118,19 +150,20 @@ class Command(BaseCommand):
         photos = ProtocolPhoto.objects.select_related("protocol").exclude(file_path__isnull=True).exclude(file_path="")
         for photo in photos:
             protocol = photo.protocol
-            root = get_root(protocol.files_location)
             file_path = str(photo.file_path).replace("\\", "/")
 
             if is_legacy_photo_path(file_path):
                 sources = [Path(settings.MEDIA_ROOT) / file_path]
-                new_path = str(
-                    PurePosixPath(protocol_folder_name(protocol)) / PHOTOS_DIR / PurePosixPath(file_path).name
-                )
+                new_path = str(PurePosixPath(PHOTOS_DIR) / PurePosixPath(file_path).name)
             else:
-                sources = [search_root / file_path for search_root in search_roots]
+                sources = [
+                    search_root / name / file_path
+                    for search_root in search_roots
+                    for name in folder_name_candidates(protocol)
+                ]
                 new_path = file_path
 
-            target = root / new_path
+            target = protocol_dir(protocol) / new_path
             if new_path == file_path and target.is_file():
                 continue
 

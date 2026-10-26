@@ -21,6 +21,8 @@ const HEADER_DOCUMENT_OPTIONS = [
   {value: "bill_of_lading", label: "Коносамент"},
   {value: "kuts", label: "КУТС"},
   {value: "vehicle_manual", label: "Руководство по эксплуатации ТС"},
+  // Текст «Иного» вводится в поле под галочками и идет в тот же список документов.
+  {value: "other", label: "Иное"},
 ];
 
 function stripProtocolNumber(value) {
@@ -190,21 +192,38 @@ function ProtocolInspectionHeader({
           />
         </Box>
 
-        <TextField
-          fullWidth
-          multiline
-          minRows={2}
-          label="Юр. лицо"
-          name="owner_legal_entity"
-          value={form.owner_legal_entity || ""}
-          onChange={handleChange}
-          sx={textFieldSx}
-          slotProps={{
-            inputLabel: {
-              shrink: true,
-            },
-          }}
-        />
+        <Box sx={headerOwnerRowSx}>
+          <TextField
+            fullWidth
+            multiline
+            minRows={2}
+            label="Юр. лицо"
+            name="owner_legal_entity"
+            value={form.owner_legal_entity || ""}
+            onChange={handleChange}
+            sx={textFieldSx}
+            slotProps={{
+              inputLabel: {
+                shrink: true,
+              },
+            }}
+          />
+          <TextField
+            fullWidth
+            multiline
+            minRows={2}
+            label="Реквизиты"
+            name="owner_requisites"
+            value={form.owner_requisites || ""}
+            onChange={handleChange}
+            sx={textFieldSx}
+            slotProps={{
+              inputLabel: {
+                shrink: true,
+              },
+            }}
+          />
+        </Box>
 
         <TextField
           fullWidth
@@ -246,6 +265,24 @@ function ProtocolInspectionHeader({
               />
             ))}
           </Box>
+
+          {(form.header_document_selections || []).includes("other") && (
+            <TextField
+              fullWidth
+              multiline
+              minRows={2}
+              label="Иное"
+              name="header_documents_other"
+              value={form.header_documents_other || ""}
+              onChange={handleChange}
+              sx={{...textFieldSx, mt: 1}}
+              slotProps={{
+                inputLabel: {
+                  shrink: true,
+                },
+              }}
+            />
+          )}
         </Box>
       </Box>
     </Paper>

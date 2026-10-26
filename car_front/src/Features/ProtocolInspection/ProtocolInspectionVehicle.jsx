@@ -2,6 +2,7 @@ import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
+import {isElectricVehicle} from "./electricVehicleFields.js";
 
 function ProtocolInspectionVehicle({
                                        form,
@@ -174,7 +175,7 @@ function ProtocolInspectionVehicle({
                     ],
                 })}
 
-                {renderSelect({
+                {!isElectricVehicle(form) && renderSelect({
                     form,
                     handleChange,
                     selectFieldSx,
