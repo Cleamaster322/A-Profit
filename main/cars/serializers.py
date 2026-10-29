@@ -546,7 +546,11 @@ class ProtocolMeasurementSerializer(
         # Проверяем, только когда в запросе есть нагрузки на оси (сохранение блока 7).
         # Иначе ошибка массы всплывала бы при любом другом сохранении замеров,
         # например в окне «Проверка данных автомобиля».
-        axles_in_request = "axle1_load_kg" in attrs or "axle2_load_kg" in attrs
+        # У замерщика проверки нет: массы он не видит, проверяет оператор.
+        axles_in_request = (
+            ("axle1_load_kg" in attrs or "axle2_load_kg" in attrs)
+            and not self.context.get("skip_drom_mass_check")
+        )
         axle1_mass = attrs.get("axle1_load_kg", getattr(self.instance, "axle1_load_kg", None))
         axle2_mass = attrs.get("axle2_load_kg", getattr(self.instance, "axle2_load_kg", None))
         if axles_in_request and mass_range is not None and axle1_mass is not None and axle2_mass is not None:
@@ -892,12 +896,15 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
 
         value = str(value).lower()
 
+        # Гибрид проверяем первым: «гибрид дизель» содержит и «диз».
+        if 'гибрид' in value or 'hybrid' in value:
+            if 'диз' in value or 'diesel' in value:
+                return 'hybrid_diesel'
+            return 'hybrid_petrol'
         if 'бенз' in value or 'petrol' in value or 'gasoline' in value:
             return 'petrol'
         if 'диз' in value or 'diesel' in value:
             return 'diesel'
-        if 'гибрид' in value or 'hybrid' in value:
-            return 'hybrid'
         if 'элект' in value or 'electric' in value:
             return 'electric'
 
@@ -1131,7 +1138,8 @@ class ProtocolCreateSerializer(DashFieldsSerializerMixin, serializers.ModelSeria
 
         ProtocolTestCondition.objects.create(protocol=protocol)
         ProtocolRoadCondition.objects.create(protocol=protocol)
-        ProtocolPowerSupply.objects.create(protocol=protocol)
+        # Частота сети почти всегда 50 Гц — подставляем сразу, менять можно.
+        ProtocolPowerSupply.objects.create(protocol=protocol, frequency_hz=Decimal("50"))
 
         return protocol
 

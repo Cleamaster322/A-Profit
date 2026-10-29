@@ -650,17 +650,13 @@ def u_vehicle_height_mm(value):
     return expanded_from_standard(standard_u)
 
 
-def u_scale_kg():
+def u_axle_load_kg(value):
     """
-    Масса и нагрузка на оси по весам:
-    Δ = ±5 кг
-    U = 1.65 * 5 / sqrt(3) = 4.763 ≈ 5 кг
+    Масса и нагрузка на оси — по тормозному стенду (как в листе оценки):
+    относительная погрешность ±3 % и цена деления 1 кг.
+    U = 1.65 * sqrt((value * 3 / 100 / sqrt(3))^2 + (1 / (2 * sqrt(3)))^2)
     """
-    standard_u = root_sum_squares(
-        standard_uncertainty_from_abs_error(Decimal("5")),
-        Decimal("5") / (Decimal("2") * SQRT_3),
-    )
-    return expanded_from_standard(standard_u)
+    return expanded_from_standard(standard_stand_load_kg(value))
 
 
 # =========================
@@ -1047,7 +1043,6 @@ def build_uncertainty_values(protocol=None):
         get_value(measurement, "vehicle_height_mm")
     )
 
-    scale_u = u_scale_kg()
 
     service_control_force_axle1_u = u_control_force_n(
         get_value(brake, "service_brake_control_force_axle1_n")
@@ -1112,9 +1107,9 @@ def build_uncertainty_values(protocol=None):
         # =========================
         # Масса и оси по весам
         # =========================
-        "u_vehicle_weight_kg": fmt_num(scale_u, 0),
-        "u_axle1_load_kg": fmt_num(scale_u, 0),
-        "u_axle2_load_kg": fmt_num(scale_u, 0),
+        "u_vehicle_weight_kg": fmt_num(u_axle_load_kg(get_value(measurement, "vehicle_weight_kg")), 2),
+        "u_axle1_load_kg": fmt_num(u_axle_load_kg(get_value(measurement, "axle1_load_kg")), 2),
+        "u_axle2_load_kg": fmt_num(u_axle_load_kg(get_value(measurement, "axle2_load_kg")), 2),
 
         # =========================
         # Тормоза

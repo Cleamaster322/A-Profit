@@ -6,7 +6,7 @@ import Checkbox from "@mui/material/Checkbox";
 import FormControlLabel from "@mui/material/FormControlLabel";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 import {calculateMeasuredSpeedKmh} from "./speedCalculations.js";
-import {isElectricVehicle} from "./electricVehicleFields.js";
+import {isDieselLikeVehicle, isElectricVehicle, isPetrolLikeVehicle} from "./electricVehicleFields.js";
 
 function ProtocolInspectionMisc({
                                     form,
@@ -20,6 +20,9 @@ function ProtocolInspectionMisc({
                                 }) {
     const measuredSpeedKmh = calculateMeasuredSpeedKmh(form.speed_by_speedometer_kmh);
     const electric = isElectricVehicle(form);
+    // CO у дизеля не меряют, коэффициент поглощения света — у бензина.
+    const showCo = !isDieselLikeVehicle(form);
+    const showLightAbsorption = !isPetrolLikeVehicle(form);
 
     return (
         <Paper sx={sectionPaperSx}>
@@ -294,7 +297,7 @@ function ProtocolInspectionMisc({
                         md: 6,
                     })}
 
-                    {renderField({
+                    {showCo && renderField({
                         form,
                         handleChange,
                         textFieldSx,
@@ -303,7 +306,7 @@ function ProtocolInspectionMisc({
                         md: 6,
                     })}
 
-                    {renderField({
+                    {showCo && renderField({
                         form,
                         handleChange,
                         textFieldSx,
@@ -313,65 +316,69 @@ function ProtocolInspectionMisc({
                     })}
                 </Grid>
 
-                <Typography variant="h6" sx={subsectionTitleSx}>
-                    Коэффициент поглощения света
-                </Typography>
+                {showLightAbsorption && (
+                    <>
+                    <Typography variant="h6" sx={subsectionTitleSx}>
+                        Коэффициент поглощения света
+                    </Typography>
 
-                <Grid container spacing={2} sx={{mb: 3}}>
-                    {renderField({
-                        form,
-                        handleChange,
-                        textFieldSx,
-                        label: "Значение 1, м-1",
-                        name: "light_absorption_1",
-                        md: 2,
-                    })}
+                    <Grid container spacing={2} sx={{mb: 3}}>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Значение 1, м-1",
+                            name: "light_absorption_1",
+                            md: 2,
+                        })}
 
-                    {renderField({
-                        form,
-                        handleChange,
-                        textFieldSx,
-                        label: "Значение 2, м-1",
-                        name: "light_absorption_2",
-                        md: 2,
-                    })}
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Значение 2, м-1",
+                            name: "light_absorption_2",
+                            md: 2,
+                        })}
 
-                    {renderField({
-                        form,
-                        handleChange,
-                        textFieldSx,
-                        label: "Значение 3, м-1",
-                        name: "light_absorption_3",
-                        md: 2,
-                    })}
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Значение 3, м-1",
+                            name: "light_absorption_3",
+                            md: 2,
+                        })}
 
-                    {renderField({
-                        form,
-                        handleChange,
-                        textFieldSx,
-                        label: "Значение 4, м-1",
-                        name: "light_absorption_4",
-                        md: 2,
-                    })}
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Значение 4, м-1",
+                            name: "light_absorption_4",
+                            md: 2,
+                        })}
 
-                    {renderField({
-                        form,
-                        handleChange,
-                        textFieldSx,
-                        label: "Значение 5, м-1",
-                        name: "light_absorption_5",
-                        md: 2,
-                    })}
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Значение 5, м-1",
+                            name: "light_absorption_5",
+                            md: 2,
+                        })}
 
-                    {renderField({
-                        form,
-                        handleChange,
-                        textFieldSx,
-                        label: "Значение 6, м-1",
-                        name: "light_absorption_6",
-                        md: 2,
-                    })}
-                </Grid>
+                        {renderField({
+                            form,
+                            handleChange,
+                            textFieldSx,
+                            label: "Значение 6, м-1",
+                            name: "light_absorption_6",
+                            md: 2,
+                        })}
+                    </Grid>
+                    </>
+                )}
                 </>
             )}
 

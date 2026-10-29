@@ -206,9 +206,9 @@ def sync_protocol_folder(protocol):
     return None
 
 
-def protocol_document_path(protocol, title):
-    """Документ протокола: <папка>/<номер> <название>.docx, например «00012 Заявка.docx»."""
-    return protocol_dir(protocol) / f'{protocol_number_label(protocol)} {title}.docx'
+def protocol_document_path(protocol, title, extension='docx'):
+    """Документ протокола: <папка>/<номер> <название>.<расширение>, например «00012 Заявка.docx»."""
+    return protocol_dir(protocol) / f'{protocol_number_label(protocol)} {title}.{extension}'
 
 
 def legacy_protocol_docx_path(protocol):
@@ -362,7 +362,7 @@ def replace_file_atomically(target_path):
             os.replace(temp_path, target_path)
         except PermissionError as error:
             raise ProtocolFileBusyError(
-                f'Файл {target_path.name} занят (возможно, открыт в Word). '
+                f'Файл {target_path.name} занят (возможно, открыт в Word или Excel). '
                 'Закройте его и повторите.'
             ) from error
     finally:

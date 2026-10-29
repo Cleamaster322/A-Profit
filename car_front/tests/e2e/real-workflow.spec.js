@@ -25,6 +25,12 @@ async function logout(page) {
 test("real users can complete the protocol workflow", async ({page}) => {
     const protocolId = fixture.E2E_PROTOCOL_ID;
 
+    // Протокол фикстуры почти пустой: проверку «все поля заполнены» здесь отключаем,
+    // тест проверяет переходы статусов, а не заполнение формы.
+    await page.route("**/cars/protocol-form-settings/", (route) => route.fulfill({
+        json: {require_all_fields: false},
+    }));
+
     await login(page, "e2e_measurer");
     await page.goto(`/protocols/${protocolId}/measurement`);
     await expect(page.getByRole("heading", {name: "Ввод данных замерщика"})).toBeVisible();

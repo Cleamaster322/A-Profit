@@ -385,7 +385,8 @@ class ProtocolMeasurement(DashFieldsMixin, models.Model):
     FUEL_TYPE_CHOICES = [
         ('petrol', 'Бензин'),
         ('diesel', 'Дизель'),
-        ('hybrid', 'Гибрид'),
+        ('hybrid_petrol', 'Гибрид-бензин'),
+        ('hybrid_diesel', 'Гибрид-дизель'),
         ('electric', 'Электро'),
     ]
 
@@ -840,3 +841,31 @@ class ProtocolStorageSettings(models.Model):
         from .services.protocol_storage import validate_storage_dirs
 
         validate_storage_dirs(self.in_progress_dir, self.completed_dir)
+
+
+# =========================
+# ProtocolFormSettings
+# =========================
+
+class ProtocolFormSettings(models.Model):
+    """Настройки формы протокола (одна запись, задаётся в админке)."""
+    require_all_fields = models.BooleanField(
+        'Проверять заполнение всех полей',
+        default=True,
+        help_text='Перед «Передать оператору», «Отправить на проверку» и «Сформировать» все видимые '
+                  'поля протокола должны быть заполнены («-» — заполнено). Выключите, чтобы проверять '
+                  'протокол по одному полю.',
+    )
+
+    class Meta:
+        db_table = 'protocol_form_settings'
+        verbose_name = 'Настройки формы протокола'
+        verbose_name_plural = 'Настройки формы протокола'
+
+    def __str__(self):
+        return 'Настройки формы протокола'
+
+    @classmethod
+    def load(cls):
+        return cls.objects.order_by('id').first() or cls()
+

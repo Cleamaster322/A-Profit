@@ -102,7 +102,8 @@ function ProtocolInspectionEngine({
                     options: [
                         {value: "petrol", label: "Бензин"},
                         {value: "diesel", label: "Дизель"},
-                        {value: "hybrid", label: "Гибрид"},
+                        {value: "hybrid_petrol", label: "Гибрид-бензин"},
+                        {value: "hybrid_diesel", label: "Гибрид-дизель"},
                         {value: "electric", label: "Электро"},
                     ],
                 })}

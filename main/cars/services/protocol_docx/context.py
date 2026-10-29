@@ -8,6 +8,7 @@ from .calculations import (
     build_uncertainty_values,
     calc_axle_load_sum_kg,
     calc_light_absorption_average,
+    u_co_pct,
 )
 from .formatters import decimal_value, fmt_bool, fmt_date, fmt_int, fmt_num, fmt_text
 from .labels import (
@@ -170,12 +171,13 @@ def is_true(value):
     return value is True
 
 
+# Гибрид-бензин считается как бензин, гибрид-дизель — как дизель.
 def is_fuel_petrol_like(value):
-    return value in ["petrol", "hybrid"]
+    return value in ["petrol", "hybrid_petrol"]
 
 
 def is_fuel_diesel(value):
-    return value == "diesel"
+    return value in ["diesel", "hybrid_diesel"]
 
 
 def conclusion_text(*lines):
@@ -308,7 +310,11 @@ def build_tire_depth_result_text(
     parts.append("Результат:")
 
     for label_text, value, uncertainty in values:
-        parts.append(f"{label_text}: {value} ± {uncertainty} мм")
+        # У летних шин погрешность уже с единицей («0,05 мм»), у зимних — без неё.
+        uncertainty_text = str(uncertainty)
+        if not uncertainty_text.endswith("мм"):
+            uncertainty_text = f"{uncertainty_text} мм"
+        parts.append(f"{label_text}: {value} ± {uncertainty_text}")
 
     return "\n".join(parts)
 
@@ -818,7 +824,7 @@ def build_dynamic_result_values(protocol, measurement, light):
             "не применяется (пробег ТС менее 3000 км)",
             "-",
         )
-    elif fuel_type == "diesel":
+    elif is_fuel_diesel(fuel_type):
         add_direct_result_pair(
             values,
             "result_a_21_7",
@@ -1303,17 +1309,42 @@ def build_rear_fog_values(light):
         "мм",
     )
 
+    # Два ЗПТФ в протоколе расписываются как «Левая» и «Правая», но меряются одной
+    # парой полей: значения у левого и правого фонаря всегда одинаковые.
+    rear_fog_number = decimal_value(getattr(light, "rear_fog_count", None))
+    two_lamps = rear_fog_number == 2
+
+    if two_lamps:
+        result_text = (
+            f"Левая нижняя граница: {lower_point} ± {lower_point_u}\n"
+            f"Левая верхняя граница: {upper_point} ± {upper_point_u}\n"
+            f"Правая нижняя граница: {lower_point} ± {lower_point_u}\n"
+            f"Правая верхняя граница: {upper_point} ± {upper_point_u}"
+        )
+    else:
+        result_text = (
+            f"Верхняя граница: {upper_point} ± {upper_point_u}\n"
+            f"Нижняя граница: {lower_point} ± {lower_point_u}"
+        )
+
     rear_fog_absence = "не применяется (в ТС отсутствуют задние противотуманные фонари)"
     full_result_a_8_13_2 = build_full_result_text(
         rear_fog_present,
         CONCLUSIONS["a_8_13_2"],
         "не менее 250 мм и не более 1000 мм",
-        f"Верхняя граница: {upper_point} ± {upper_point_u}\n"
-        f"Нижняя граница: {lower_point} ± {lower_point_u}",
+        result_text,
         not_applicable_text=rear_fog_absence,
     )
 
     return {
+        # Условия шаблона для 8.13.2: один ЗПТФ / два ЗПТФ (нет — not a_8_13_is_applicable).
+        "a_8_13_2_one_lamp": rear_fog_number == 1,
+        "a_8_13_2_two_lamps": two_lamps,
+        "a_8_13_2_left_lower_point_value": lower_point,
+        "a_8_13_2_left_upper_point_value": upper_point,
+        "a_8_13_2_right_lower_point_value": lower_point,
+        "a_8_13_2_right_upper_point_value": upper_point,
+
         "rear_fog_upper_point_8_13_2": upper_point,
         "rear_fog_lower_point_8_13_2": lower_point,
         "u_rear_fog_upper_point_8_13_2": upper_point_u,
@@ -1453,15 +1484,16 @@ def build_eco_values(protocol, measurement):
 
     mileage_below_3000 = mileage is not None and mileage < 3000
 
-    co_applicable = not mileage_below_3000 and fuel_type not in {"diesel", "electric"}
+    co_applicable = not mileage_below_3000 and not is_fuel_diesel(fuel_type) and fuel_type != "electric"
     diesel_applicable = (
         not mileage_below_3000
-        and fuel_type not in {"petrol", "hybrid", "electric"}
+        and not is_fuel_petrol_like(fuel_type)
+        and fuel_type != "electric"
     )
 
     if mileage_below_3000:
         co_not_applicable_text = "не применяется (пробег ТС менее 3000 км)"
-    elif fuel_type == "diesel":
+    elif is_fuel_diesel(fuel_type):
         co_not_applicable_text = "не применяется (ТС оборудовано дизельным двигателем)"
     elif fuel_type == "electric":
         co_not_applicable_text = "не применяется (ТС оборудовано только электродвигателем)"
@@ -1477,6 +1509,8 @@ def build_eco_values(protocol, measurement):
     else:
         diesel_not_applicable_text = None
 
+    # U для CO по газоанализатору (±0,03 %): 1,65 · 0,03 / √3 ≈ 0,03 %.
+    co_u = fmt_num(u_co_pct(), 2)
     co_min = getattr(measurement, "co_min_pct", None)
     co_max = getattr(measurement, "co_max_pct", None)
 
@@ -1491,7 +1525,7 @@ def build_eco_values(protocol, measurement):
 
     return {
         "a_21_7_low_mileage": mileage_below_3000,
-        "a_21_7_diesel": fuel_type == "diesel",
+        "a_21_7_diesel": is_fuel_diesel(fuel_type),
         "a_21_7_electric": fuel_type == "electric",
         "a_21_7_numeric": co_applicable,
         "a_21_8_low_mileage": mileage_below_3000,
@@ -1519,25 +1553,25 @@ def build_eco_values(protocol, measurement):
         "u_co_min_21_7": uncertainty_if_applicable(
             co_applicable,
             co_min,
-            "0,19",
+            co_u,
         ),
         "u_co_max_21_7": uncertainty_if_applicable(
             co_applicable,
             co_max,
-            "0,19",
+            co_u,
         ),
 
         "co_min_result_21_7": result_with_uncertainty_if_applicable(
             co_applicable,
             co_min,
-            "0,19",
+            co_u,
             2,
             "%",
         ),
         "co_max_result_21_7": result_with_uncertainty_if_applicable(
             co_applicable,
             co_max,
-            "0,19",
+            co_u,
             2,
             "%",
         ),
@@ -1546,8 +1580,8 @@ def build_eco_values(protocol, measurement):
             co_applicable,
             CONCLUSIONS["a_21_7"],
             "Минимальная - не более 0,3 %\nПовышенная - не более 0,2 %",
-            f"Минимальная - {result_with_uncertainty_if_applicable(co_applicable, co_min, '0,19', 2, '%')}\n"
-            f"Повышенная - {result_with_uncertainty_if_applicable(co_applicable, co_max, '0,19', 2, '%')}",
+            f"Минимальная - {result_with_uncertainty_if_applicable(co_applicable, co_min, co_u, 2, '%')}\n"
+            f"Повышенная - {result_with_uncertainty_if_applicable(co_applicable, co_max, co_u, 2, '%')}",
             co_not_applicable_text,
         ),
 

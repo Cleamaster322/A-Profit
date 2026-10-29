@@ -41,6 +41,7 @@ from .views import (
     get_protocol_brake,
     get_protocol_light,
     get_protocol_measurement,
+    get_protocol_form_settings,
     get_protocol_photo_file,
     get_protocol_photo_slots,
     get_protocol_photos,
@@ -205,6 +206,7 @@ urlpatterns = [
     # --- PHOTOS ---
     # =========================================================
     path('protocol-photo-slots/', get_protocol_photo_slots),
+    path('protocol-form-settings/', get_protocol_form_settings),
     path('protocols/<int:protocol_id>/photos/', protocol_access_required(get_protocol_photos)),
     path('protocols/<int:protocol_id>/photos/create/', protocol_access_required(create_protocol_photo)),
     path('protocol-photos/<int:photo_id>/delete/', protocol_access_required(delete_protocol_photo)),

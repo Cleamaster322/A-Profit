@@ -16,6 +16,7 @@ from docx.shared import Inches
 
 PLACEHOLDER_RE = re.compile(r"{{\s*([a-zA-Z0-9_]+)\s*}}")
 TR_IF_RE = re.compile(r"{%\s*tr\s+if\s+(.+?)\s*%}")
+TR_ELIF_RE = re.compile(r"{%\s*tr\s+elif\s+(.+?)\s*%}")
 TR_ELSE_RE = re.compile(r"{%\s*tr\s+else\s*%}")
 TR_ENDIF_RE = re.compile(r"{%\s*tr\s+endif\s*%}")
 
@@ -173,6 +174,8 @@ def process_table_conditions(table, context):
 
     {%tr if parking_light_present %}
         строка или несколько строк
+    {%tr elif other_condition %}
+        строки, если первое условие ложно, а это истинно (elif может быть несколько)
     {%tr else %}
         альтернативная строка или несколько строк
     {%tr endif %}
@@ -192,6 +195,7 @@ def process_table_conditions(table, context):
         row_text = get_row_text(row)
 
         if_match = TR_IF_RE.search(row_text)
+        elif_match = TR_ELIF_RE.search(row_text)
         else_match = TR_ELSE_RE.search(row_text)
         endif_match = TR_ENDIF_RE.search(row_text)
 
@@ -204,12 +208,25 @@ def process_table_conditions(table, context):
             condition_result = evaluate_tr_condition(if_match.group(1), context)
             condition_stack.append({
                 "parent_active": parent_active,
+                # Сработала ли уже какая-то ветка (if или один из elif).
                 "condition_result": condition_result,
                 "active": parent_active and condition_result,
                 "else_seen": False,
             })
 
             rows_to_delete.append(row)
+            continue
+
+        if elif_match:
+            rows_to_delete.append(row)
+            if condition_stack and not condition_stack[-1]["else_seen"]:
+                frame = condition_stack[-1]
+                branch_result = (
+                    not frame["condition_result"]
+                    and evaluate_tr_condition(elif_match.group(1), context)
+                )
+                frame["active"] = frame["parent_active"] and branch_result
+                frame["condition_result"] = frame["condition_result"] or branch_result
             continue
 
         if else_match:

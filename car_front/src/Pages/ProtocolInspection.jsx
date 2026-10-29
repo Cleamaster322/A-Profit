@@ -25,8 +25,15 @@ import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolIns
 import {calculateBrakeMetrics, validateBrakeMetrics} from "../Features/ProtocolInspection/brakeCalculations.js";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
 import ProtocolInspectionPhotos from "../Features/ProtocolInspection/ProtocolInspectionPhotos.jsx";
-import {withoutElectricHiddenFields} from "../Features/ProtocolInspection/electricVehicleFields.js";
+import {withoutFuelHiddenFields} from "../Features/ProtocolInspection/electricVehicleFields.js";
 import {getProtocolPhotoSlots} from "../shared/protocolPhotoApi.jsx";
+import {
+    buildMissingFieldsMessage,
+    clearMissingMark,
+    findMissingRequiredFields,
+    markMissingFields,
+    missingFieldSx,
+} from "../Features/ProtocolInspection/requiredFields.js";
 import {
     applyProtocolDraft,
     clearProtocolDraft,
@@ -58,9 +65,10 @@ function normalizeCatalogReviewValue(key, value) {
     if (!text) return value;
 
     if (key === "fuel_type") {
+        // Гибрид проверяем первым: «гибрид дизель» содержит и «диз».
+        if (/гибрид|hybrid/.test(text)) return /диз|diesel/.test(text) ? "hybrid_diesel" : "hybrid_petrol";
         if (/бенз|petrol|gasoline/.test(text)) return "petrol";
         if (/диз|diesel/.test(text)) return "diesel";
-        if (/гибрид|hybrid/.test(text)) return "hybrid";
         if (/элект|electric/.test(text)) return "electric";
     }
 
@@ -948,7 +956,10 @@ function mapProtocolToForm(data) {
         road_ambient_temp_c: toFormValue(roadConditions.road_ambient_temperature_c, roadConditionsDashFields, "road_ambient_temperature_c"),
         road_ambient_humidity_pct: toFormValue(roadConditions.road_relative_humidity_pct, roadConditionsDashFields, "road_relative_humidity_pct"),
 
-        electric_frequency_hz: toFormValue(powerSupply.frequency_hz, powerSupplyDashFields, "frequency_hz"),
+        // "50.00" из API показываем как "50".
+        electric_frequency_hz: toDecimalOptionFormValue(
+            toFormValue(powerSupply.frequency_hz, powerSupplyDashFields, "frequency_hz")
+        ),
         voltage_phase_a_zero: toFormValue(powerSupply.phase_a_n_voltage_v, powerSupplyDashFields, "phase_a_n_voltage_v"),
         voltage_phase_b_zero: toFormValue(powerSupply.phase_b_n_voltage_v, powerSupplyDashFields, "phase_b_n_voltage_v"),
         voltage_phase_c_zero: toFormValue(powerSupply.phase_c_n_voltage_v, powerSupplyDashFields, "phase_c_n_voltage_v"),
@@ -1391,6 +1402,9 @@ function ProtocolInspection({measurementMode = false}) {
     const [successMessage, setSuccessMessage] = useState("");
     const [errorMessage, setErrorMessage] = useState("");
     const [blockErrors, setBlockErrors] = useState({});
+    // «Проверять заполнение всех полей» из админки; по умолчанию проверка включена.
+    const [requireAllFields, setRequireAllFields] = useState(true);
+    const formContainerRef = useRef(null);
     const [catalogConfiguration, setCatalogConfiguration] = useState(null);
     const [dataReviewOpen, setDataReviewOpen] = useState(
         Boolean(location.state?.openDataReview)
@@ -1791,9 +1805,10 @@ function ProtocolInspection({measurementMode = false}) {
 
     const handleSave = async (options = {}) => {
         const {showSuccessMessage = true} = options;
-        // Для электромобиля скрытые поля (ДВС, экология, шум, дымность) уходят пустыми,
+        // Поля, скрытые по виду топлива (у электро — ДВС, экология, шум, дымность;
+        // у дизеля — CO; у бензина — коэффициент поглощения), уходят пустыми,
         // чтобы не проверялись и не попадали в документы.
-        const activeForm = withoutElectricHiddenFields(options.formOverride || form);
+        const activeForm = withoutFuelHiddenFields(options.formOverride || form);
 
         try {
             setSaving(true);
@@ -1810,7 +1825,10 @@ function ProtocolInspection({measurementMode = false}) {
 
             const numericErrors = validateProtocolNumericRanges(activeForm);
             const textErrors = validateProtocolTextFields(activeForm);
-            const brakeMetricErrors = validateBrakeMetrics(activeForm, dromMassKg);
+            // Замерщик не видит масс: проверку 1–5 % от массы Drom делает оператор.
+            const brakeMetricErrors = validateBrakeMetrics(activeForm, dromMassKg, {
+                skipDromMassCheck: measurementMode,
+            });
             const validationErrors = [...numericErrors, ...textErrors, ...brakeMetricErrors];
             if (validationErrors.length) {
                 setErrorMessage(
@@ -1934,9 +1952,34 @@ function ProtocolInspection({measurementMode = false}) {
         }
     };
 
+    // Все видимые поля должны быть заполнены: пустые подсвечиваем и прокручиваем к первому.
+    const ensureAllFieldsFilled = () => {
+        if (!requireAllFields) {
+            return true;
+        }
+
+        const container = formContainerRef.current;
+        const missingFields = findMissingRequiredFields(container);
+        markMissingFields(container, missingFields);
+
+        if (!missingFields.length) {
+            return true;
+        }
+
+        setSuccessMessage("");
+        setErrorMessage(buildMissingFieldsMessage(missingFields));
+        missingFields[0].scrollIntoView({behavior: "smooth", block: "center"});
+        missingFields[0].focus({preventScroll: true});
+        return false;
+    };
+
     const handleCompleteProtocol = async () => {
         if (!currentProtocolId) {
             setErrorMessage("Не передан ID протокола");
+            return;
+        }
+
+        if (!ensureAllFieldsFilled()) {
             return;
         }
 
@@ -2054,6 +2097,10 @@ function ProtocolInspection({measurementMode = false}) {
             return;
         }
 
+        if (!ensureAllFieldsFilled()) {
+            return;
+        }
+
         const saved = await handleSave({
             showSuccessMessage: false,
         });
@@ -2123,6 +2170,24 @@ function ProtocolInspection({measurementMode = false}) {
             );
         }
     };
+
+    useEffect(() => {
+        let cancelled = false;
+
+        api.get("/cars/protocol-form-settings/")
+            .then((response) => {
+                if (!cancelled) {
+                    setRequireAllFields(response.data.require_all_fields !== false);
+                }
+            })
+            .catch((error) => {
+                console.error("Ошибка загрузки настроек формы:", error);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     useEffect(() => {
         let cancelled = false;
@@ -2593,7 +2658,12 @@ function ProtocolInspection({measurementMode = false}) {
             <AppHeader beforeNavigate={releaseProtocolLock}/>
 
             <Box sx={pageSx}>
-                <Box sx={pageInnerSx}>
+                <Box
+                    ref={formContainerRef}
+                    sx={{...pageInnerSx, ...missingFieldSx}}
+                    onInput={(event) => clearMissingMark(event.target)}
+                    onChange={(event) => clearMissingMark(event.target)}
+                >
                     <Box
                         sx={{
                             display: "flex",

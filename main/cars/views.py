@@ -32,6 +32,7 @@ from .models import (
     ProtocolMeasurement,
     ProtocolBrake,
     ProtocolLight,
+    ProtocolFormSettings,
     ProtocolPhoto,
     ProtocolTestCondition,
     ProtocolRoadCondition,
@@ -2125,7 +2126,11 @@ def create_protocol_measurement(request, protocol_id):
         data = request.data.copy()
         data['protocol'] = protocol_id
 
-        serializer = ProtocolMeasurementSerializer(data=data)
+        # Замерщик не видит масс, проверку 1–5 % делает оператор.
+        serializer = ProtocolMeasurementSerializer(
+            data=data,
+            context={'skip_drom_mass_check': is_measurer_request(request)},
+        )
         if serializer.is_valid():
             serializer.save()
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -2147,10 +2152,12 @@ def update_protocol_measurement(request, protocol_id):
         data = request.data.copy()
         data['protocol'] = protocol_id
 
+        # Замерщик не видит масс, проверку 1–5 % делает оператор.
         serializer = ProtocolMeasurementSerializer(
             obj,
             data=data,
-            partial=(request.method == 'PATCH')
+            partial=(request.method == 'PATCH'),
+            context={'skip_drom_mass_check': is_measurer_request(request)},
         )
         if serializer.is_valid():
             serializer.save()
@@ -2349,6 +2356,13 @@ def validate_photo_file(uploaded_file):
 # =========================================================
 # --- PROTOCOL-PHOTO FUNCTIONS ---
 # =========================================================
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_protocol_form_settings(request):
+    settings_obj = ProtocolFormSettings.load()
+    return Response({'require_all_fields': settings_obj.require_all_fields})
+
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

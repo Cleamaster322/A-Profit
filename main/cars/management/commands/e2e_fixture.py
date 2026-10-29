@@ -3,7 +3,30 @@ from datetime import date
 from django.contrib.auth.models import Group, User
 from django.core.management.base import BaseCommand
 
-from cars.models import Brand, CarData, Configuration, Generation, Model, Protocol
+from cars.models import (
+    Brand,
+    CarData,
+    Configuration,
+    Generation,
+    Model,
+    Protocol,
+    ProtocolBrake,
+    ProtocolLight,
+    ProtocolMeasurement,
+    ProtocolPowerSupply,
+    ProtocolRoadCondition,
+    ProtocolTestCondition,
+)
+
+# Разделы, которые создаёт обычное создание протокола: форма сохраняет их через update/.
+PROTOCOL_SECTIONS = (
+    ProtocolMeasurement,
+    ProtocolBrake,
+    ProtocolLight,
+    ProtocolTestCondition,
+    ProtocolRoadCondition,
+    ProtocolPowerSupply,
+)
 
 
 PREFIX = "E2E-"
@@ -137,6 +160,10 @@ class Command(BaseCommand):
             commercial_name="RIO",
             status="measurement",
         )
+
+        for protocol in (first, second, selection):
+            for section in PROTOCOL_SECTIONS:
+                section.objects.create(protocol=protocol)
 
         self.stdout.write(f"E2E_PROTOCOL_ID={first.id}")
         self.stdout.write(f"E2E_LOCK_PROTOCOL_ID={second.id}")

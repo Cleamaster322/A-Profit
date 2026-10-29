@@ -13,6 +13,8 @@ from .protocol_storage import (
     sync_protocol_folder,
 )
 from .protocol_word import count_word_pages
+from .evaluation_sheet import build_evaluation_context
+from .xlsx_renderer import render_xlsx
 
 TEMPLATES_DIR = Path(settings.BASE_DIR) / "cars" / "templates"
 
@@ -25,6 +27,9 @@ PROTOCOL_DOCUMENTS = [
     ("Заявка", "application_template.docx", False),
     ("Техзапись", "tech_record_template.docx", False),
 ]
+
+# Лист оценки неопределенности — Excel, свой контекст (services/evaluation_sheet.py).
+EVALUATION_DOCUMENT = ("Лист оценки", "evaluation_sheet_template.xlsx")
 
 
 def build_document_context(protocol):
@@ -100,6 +105,20 @@ def generate_protocol_documents(protocol):
             continue
 
         result["files"].append(output_path)
+
+    title, template_name = EVALUATION_DOCUMENT
+    template_path = TEMPLATES_DIR / template_name
+    if not template_path.exists():
+        result["skipped"].append(f"{title} (нет шаблона {template_name})")
+    else:
+        output_path = protocol_document_path(protocol, title, extension="xlsx")
+        try:
+            with replace_file_atomically(output_path) as temp_path:
+                render_xlsx(template_path, temp_path, build_evaluation_context(protocol))
+        except ProtocolFileBusyError as error:
+            result["errors"].append(str(error))
+        else:
+            result["files"].append(output_path)
 
     # До появления нескольких документов протокол лежал в папке как <номер>.docx.
     if result["files"]:

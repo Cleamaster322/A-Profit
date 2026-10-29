@@ -18,7 +18,8 @@ CYLINDER_LAYOUT_LABELS = {
 FUEL_TYPE_LABELS = {
     "petrol": "Бензин",
     "diesel": "Дизель",
-    "hybrid": "Гибрид",
+    "hybrid_petrol": "Гибрид-бензин",
+    "hybrid_diesel": "Гибрид-дизель",
     "electric": "Электро",
 }
 

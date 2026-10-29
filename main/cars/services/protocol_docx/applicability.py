@@ -87,7 +87,7 @@ _EXCEL_REASON_OPTIONS = {
     "not_applicable_a_20_6": "не применяется (ТС оборудовано только электродвигателем)",
     "not_applicable_a_20_7": "не применяется (ТС оборудовано только электродвигателем)",
     "not_applicable_a_20_8": "не применяется (ТС оборудовано только электродвигателем)",
-    "not_applicable_a_21_3_petrol": "не применяется (ТС оборудовано бензиновым двигателем)",
+    "not_applicable_a_21_3_petrol": "не применяется (ТС оборудовано только бензиновым двигателем)",
     "not_applicable_a_21_3_electric": "не применяется (ТС оборудовано только электродвигателем)",
     "not_applicable_a_21_3_m1_under_3500kg": "не применяется (ТС категории М1 массой менее 3,5 т)",
     "not_applicable_a_21_4": "не применяется (ТС оборудовано только электродвигателем)",
@@ -179,7 +179,7 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         return number is not None and number > 0
 
     def is_fuel_petrol_like(value):
-        return value in {"petrol", "hybrid"}
+        return value in {"petrol", "hybrid_petrol"}
 
     for code in _point_codes():
         status = dynamic_values.get(f"result_{code}_status")
@@ -307,12 +307,14 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
         else reason("a_20_5_2_no_vapor_protection"),
     )
 
+    # А.21.3: бензин / электро — свои причины; иначе это дизель, а дизель в лабораторию
+    # берут только М1 до 3,5 т — значит «ТС категории М1 массой менее 3,5 т».
     if is_fuel_petrol_like(fuel_type):
         a_21_3 = reason("a_21_3_petrol")
     elif electric:
         a_21_3 = reason("a_21_3_electric")
     else:
-        a_21_3 = "не указано"
+        a_21_3 = reason("a_21_3_m1_under_3500kg")
     set_value("a_21_3", a_21_3)
 
     mileage = decimal_value(getattr(measurement, "mileage_km", None))
@@ -329,7 +331,7 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
 
     if electric:
         set_value("a_23_1", reason("a_23_1"))
-    elif fuel_type in {"petrol", "diesel", "hybrid"}:
+    elif fuel_type in {"petrol", "diesel", "hybrid_petrol", "hybrid_diesel"}:
         set_value(
             "a_23_1",
             "Соответствует требованиям\n"
@@ -343,7 +345,7 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
             f"{dynamic_values.get('exhaust_noise_deceleration_db', '-')} дБА ± "
             f"{dynamic_values.get('u_exhaust_noise_deceleration_db', '-')} дБА",
         )
-    elif fuel_type in {"petrol", "diesel", "hybrid"}:
+    elif fuel_type in {"petrol", "diesel", "hybrid_petrol", "hybrid_diesel"}:
         set_value(
             "a_23_1",
             "Соответствует требованиям\n"

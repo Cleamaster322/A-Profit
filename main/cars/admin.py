@@ -17,6 +17,7 @@ from .models import (
     ProtocolPhoto,
     ProtocolPowerSupply,
     ProtocolRoadCondition,
+    ProtocolFormSettings,
     ProtocolStorageSettings,
     ProtocolTestCondition,
 )
@@ -127,6 +128,16 @@ class ProtocolStorageSettingsAdmin(admin.ModelAdmin):
     # Одна запись: добавить можно, только пока её нет; удалять нельзя.
     def has_add_permission(self, request):
         return not ProtocolStorageSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ProtocolFormSettings)
+class ProtocolFormSettingsAdmin(admin.ModelAdmin):
+    # Одна запись: добавить можно, только пока её нет; удалять нельзя.
+    def has_add_permission(self, request):
+        return not ProtocolFormSettings.objects.exists()
 
     def has_delete_permission(self, request, obj=None):
         return False

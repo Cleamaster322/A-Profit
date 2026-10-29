@@ -111,7 +111,7 @@ export function getDromMassComparisonError(form, dromMassKg = form.vehicle_weigh
   return `Расчетная масса ${formatMassKg(calculatedMass)} кг вне диапазона ${formatMassKg(range.min)}–${formatMassKg(range.max)} кг (на 1–5 % меньше массы Drom с учетом мест).`;
 }
 
-export function validateBrakeMetrics(form, dromMassKg = form.vehicle_weight_kg) {
+export function validateBrakeMetrics(form, dromMassKg = form.vehicle_weight_kg, options = {}) {
   const metrics = calculateBrakeMetrics(form, dromMassKg);
   const checks = [
     {value: metrics.serviceSpecificForce, min: 0.52, max: 0.98, fieldName: "service_brake_front_left_kn", label: "Удельная тормозная сила рабочей тормозной системы"},
@@ -125,7 +125,7 @@ export function validateBrakeMetrics(form, dromMassKg = form.vehicle_weight_kg) 
       fieldName,
       message: `${label}: ${value.toFixed(2)} вне допустимого диапазона ${min.toFixed(2)}–${max.toFixed(2)}.`,
     }));
-  const massError = getDromMassComparisonError(form, dromMassKg);
+  const massError = options.skipDromMassCheck ? "" : getDromMassComparisonError(form, dromMassKg);
 
   if (massError) errors.unshift({fieldName: "axle1_load_kg", message: massError});
   return errors;

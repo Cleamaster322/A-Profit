@@ -3,6 +3,7 @@ from decimal import Decimal
 from io import StringIO
 import os
 import re
+import shutil
 import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -17,6 +18,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.utils import timezone
 from docx import Document
 from PIL import Image
+from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
 
 from .models import (
@@ -28,10 +30,12 @@ from .models import (
 	Protocol,
 	ProtocolBrake,
 	ProtocolMeasurement,
+	ProtocolFormSettings,
 	ProtocolPhoto,
 	ProtocolStorageSettings,
 )
 from .serializers import (
+	ProtocolCreateSerializer,
 	ConfigurationSerializer,
 	ProtocolBrakeSerializer,
 	ProtocolLightSerializer,
@@ -40,6 +44,7 @@ from .serializers import (
 	ProtocolTestConditionSerializer,
 )
 from .services.protocol_docx.calculations import (
+	build_uncertainty_values,
 	calc_axle_mass_range_kg,
 	calc_drom_full_mass_kg,
 	count_seats,
@@ -51,13 +56,15 @@ from .services.protocol_docx.calculations import (
 	u_control_force_n,
 	u_glass_transparency_pct,
 	u_noise_db,
-	u_scale_kg,
+	u_axle_load_kg,
 	u_speed_kmh,
 	u_steering_backlash_deg,
 	u_turn_signal_frequency_hz,
 	u_vehicle_height_mm,
 )
+from .services.evaluation_sheet import EVALUATION_ROWS, build_evaluation_context
 from .services.protocol_docx_generator import generate_protocol_docx
+from .services.xlsx_renderer import render_xlsx
 from .services.protocol_storage import (
 	photo_file_stem,
 	protocol_number_label,
@@ -884,6 +891,18 @@ class ProtocolTemplateGenerationTests(SimpleTestCase):
 			"Соответствует требованиям\nТР ТС 018/2011\nПриложение №8 п.9.7",
 		)
 
+	def test_co_uncertainty_comes_from_gas_analyzer_error(self):
+		values = build_eco_values(
+			SimpleNamespace(),
+			SimpleNamespace(fuel_type="petrol", mileage_km=5000, co_min_pct=Decimal("0.10"), co_max_pct=Decimal("0.05")),
+		)
+		# Газоанализатор ±0,03 %: U = 1,65 · 0,03 / √3 ≈ 0,03 %.
+		self.assertEqual(values["u_co_min_21_7"], "0,03")
+		self.assertEqual(values["co_min_result_21_7"], "0,10 % ± 0,03 %")
+		self.assertIn("Минимальная - 0,10 % ± 0,03 %", values["full_result_a_21_7"])
+		self.assertIn("Повышенная - 0,05 % ± 0,03 %", values["full_result_a_21_7"])
+		self.assertNotIn("0,19", values["full_result_a_21_7"])
+
 	def test_electric_vehicle_has_dash_in_21_9_conclusion(self):
 		values = build_eco_values(SimpleNamespace(), SimpleNamespace(fuel_type="electric", mileage_km=None))
 		self.assertEqual(values["full_result_a_21_9"], "-")
@@ -1042,6 +1061,26 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertTrue((self.in_progress / self.folder / "photos" / "old.jpg").exists())
 		self.assertFalse((self.in_progress / "00001").exists())
 
+	def test_new_protocol_gets_50_hz_network_frequency_that_can_be_changed(self):
+		self.client.force_authenticate(user=self.measurer)
+		response = self.post("/cars/protocols/create/", {"vin": "JTDBR32E720123456"})
+		self.assertEqual(response.status_code, 201)
+
+		protocol = Protocol.objects.get(pk=response.data["id"])
+		self.assertEqual(protocol.power_supply.frequency_hz, Decimal("50"))
+
+		protocol.locked_by = self.measurer
+		protocol.locked_at = timezone.now()
+		protocol.save(update_fields=["locked_by", "locked_at"])
+		update = self.client.patch(
+			f"/cars/protocols/{protocol.id}/power-supply/update/",
+			{"frequency_hz": "49.5"},
+			format="json",
+		)
+		self.assertEqual(update.status_code, 200, update.data)
+		protocol.power_supply.refresh_from_db()
+		self.assertEqual(protocol.power_supply.frequency_hz, Decimal("49.5"))
+
 	def test_protocol_created_without_owner_name_keeps_it_empty(self):
 		self.client.force_authenticate(user=self.measurer)
 		response = self.post("/cars/protocols/create/", {"brand_name": "KIA"})
@@ -1131,6 +1170,16 @@ class ProtocolFileStorageTests(TestCase):
 
 		full = self.client.get(f"/cars/protocols/{self.protocol.id}/full/").data
 		self.assertEqual([photo["photo_type"] for photo in full["photos"]], ["acceptance_photo", "speed_photo"])
+
+	def test_form_settings_require_all_fields_by_default_and_follow_admin(self):
+		self.client.force_authenticate(user=self.measurer)
+		self.assertEqual(self.client.get("/cars/protocol-form-settings/").data, {"require_all_fields": True})
+
+		ProtocolFormSettings.objects.create(require_all_fields=False)
+		self.assertEqual(self.client.get("/cars/protocol-form-settings/").data, {"require_all_fields": False})
+
+		self.client.force_authenticate(user=None)
+		self.assertEqual(self.client.get("/cars/protocol-form-settings/").status_code, 401)
 
 	def test_photo_slots_follow_excel_scheme(self):
 		self.client.force_authenticate(user=self.measurer)
@@ -1249,11 +1298,18 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertFalse((self.in_progress / self.folder).exists())
 		self.assertTrue(unrelated.exists())
 
-	def make_document_templates(self, templates_dir, titles=("protocol", "application", "tech_record")):
+	def make_document_templates(
+		self, templates_dir, titles=("protocol", "application", "tech_record"), evaluation_sheet=True,
+	):
 		for name in titles:
 			template = Document()
 			template.add_paragraph(f"{name}: {{{{ protocol_number }}}} {{{{ applicant_name }}}}")
 			template.save(templates_dir / f"{name}_template.docx")
+		if evaluation_sheet:
+			shutil.copy(
+				Path(__file__).parent / "templates" / "evaluation_sheet_template.xlsx",
+				templates_dir / "evaluation_sheet_template.xlsx",
+			)
 
 	def generate_documents(self, templates_dir):
 		self.client.force_authenticate(user=self.measurer)
@@ -1282,7 +1338,7 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertEqual(response.data["folder"], str(self.in_progress / self.folder))
 		self.assertEqual(
 			response.data["files"],
-			["00001 Протокол.docx", "00001 Заявка.docx", "00001 Техзапись.docx"],
+			["00001 Протокол.docx", "00001 Заявка.docx", "00001 Техзапись.docx", "00001 Лист оценки.xlsx"],
 		)
 		self.assertEqual(response.data["skipped"], [])
 		# Страницы через Word считаются только для протокола.
@@ -1293,13 +1349,15 @@ class ProtocolFileStorageTests(TestCase):
 		)
 		self.assertEqual(
 			sorted(path.name for path in (self.in_progress / self.folder).iterdir()),
-			["00001 Заявка.docx", "00001 Протокол.docx", "00001 Техзапись.docx"],
+			["00001 Заявка.docx", "00001 Лист оценки.xlsx", "00001 Протокол.docx", "00001 Техзапись.docx"],
 		)
+		sheet = load_workbook(self.in_progress / self.folder / "00001 Лист оценки.xlsx").active
+		self.assertTrue(sheet["B1"].value.startswith("Лист оценки неопределенности к протоколу № 00001"))
 
 	def test_generate_skips_documents_without_template(self):
 		templates_dir = self.temp / "templates"
 		templates_dir.mkdir()
-		self.make_document_templates(templates_dir, titles=("protocol",))
+		self.make_document_templates(templates_dir, titles=("protocol",), evaluation_sheet=False)
 
 		response, _ = self.generate_documents(templates_dir)
 
@@ -1310,6 +1368,7 @@ class ProtocolFileStorageTests(TestCase):
 			[
 				"Заявка (нет шаблона application_template.docx)",
 				"Техзапись (нет шаблона tech_record_template.docx)",
+				"Лист оценки (нет шаблона evaluation_sheet_template.xlsx)",
 			],
 		)
 
@@ -1333,11 +1392,14 @@ class ProtocolFileStorageTests(TestCase):
 
 		self.assertEqual(response.status_code, 409)
 		self.assertIn("занят", response.data["detail"])
-		self.assertEqual(response.data["files"], ["00001 Протокол.docx", "00001 Техзапись.docx"])
+		self.assertEqual(
+			response.data["files"],
+			["00001 Протокол.docx", "00001 Техзапись.docx", "00001 Лист оценки.xlsx"],
+		)
 		self.assertEqual(busy.read_bytes(), b"opened in word")
 		self.assertEqual(
 			sorted(path.name for path in folder.iterdir()),
-			["00001 Заявка.docx", "00001 Протокол.docx", "00001 Техзапись.docx"],
+			["00001 Заявка.docx", "00001 Лист оценки.xlsx", "00001 Протокол.docx", "00001 Техзапись.docx"],
 		)
 
 	def test_manufacture_year_comes_from_selected_manufacture_date(self):
@@ -1424,6 +1486,124 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertTrue((self.in_progress / self.folder / photo.file_path).exists())
 
 
+class EvaluationSheetTests(SimpleTestCase):
+	def make_template(self, path, rows):
+		workbook = Workbook()
+		sheet = workbook.active
+		for index, row in enumerate(rows, start=1):
+			for column, value in enumerate(row, start=1):
+				sheet.cell(row=index, column=column, value=value)
+		sheet["B2"].number_format = "0.00"
+		workbook.save(path)
+
+	def test_xlsx_renderer_fills_numbers_and_removes_rows_by_conditions(self):
+		with TemporaryDirectory() as temp_dir:
+			template = Path(temp_dir) / "template.xlsx"
+			output = Path(temp_dir) / "output.xlsx"
+			self.make_template(template, [
+				["Протокол № {{ number }}", None],
+				["число", "{{ value }}"],
+				["{%tr if one %}", None],
+				["один", None],
+				["{%tr elif two %}", None],
+				["два", None],
+				["{%tr else %}", None],
+				["нет", None],
+				["{%tr endif %}", None],
+				["после", "{{ missing }}"],
+			])
+
+			render_xlsx(template, output, {"number": "00012", "value": 490.0, "one": False, "two": True})
+			sheet = load_workbook(output).active
+
+		self.assertEqual(
+			[sheet.cell(row=row, column=1).value for row in range(1, sheet.max_row + 1)],
+			["Протокол № 00012", "число", "два", "после"],
+		)
+		self.assertEqual(sheet["B2"].value, 490)
+		self.assertEqual(sheet["B2"].number_format, "0.00")
+		self.assertIn(sheet["B4"].value, ("", None))
+
+	def make_protocol(self, fuel_type="petrol", rear_fog_count=1):
+		return SimpleNamespace(
+			protocol_number="00012",
+			protocol_date=date(2026, 10, 29),
+			tire_season="summer",
+			measurement=SimpleNamespace(
+				fuel_type=fuel_type,
+				vehicle_length_mm=Decimal("4640"),
+				vehicle_width_mm=Decimal("1780"),
+				vehicle_height_mm=Decimal("1435"),
+				co_min_pct=Decimal("0.1"),
+				co_max_pct=None,
+				sun_strip_width_mm=None,
+				light_absorption_1=Decimal("0.20"),
+				light_absorption_2=Decimal("0.22"),
+				light_absorption_3=Decimal("0.24"),
+				light_absorption_4=None,
+				light_absorption_5=None,
+				light_absorption_6=None,
+				axle1_load_kg=Decimal("995"),
+			),
+			brake=SimpleNamespace(
+				parking_brake_type="mechanical_hand",
+				service_brake_control_force_axle1_n=Decimal("490"),
+			),
+			light=SimpleNamespace(rear_fog_count=rear_fog_count, front_fog_count=0),
+		)
+
+	def test_evaluation_values_match_excel_prototype(self):
+		context = build_evaluation_context(self.make_protocol())
+
+		self.assertEqual(context["protocol_number"], "00012")
+		# Рулетка: длина 4640 мм — интервал 4–5 м, Δ = 0,75 мм.
+		self.assertEqual(context["ev_vehicle_length_error"], "±0,75 мм")
+		self.assertAlmostEqual(context["ev_vehicle_length_ub"], 0.4330127, places=6)
+		self.assertAlmostEqual(context["ev_vehicle_length_u"], 0.7144710, places=6)
+		self.assertEqual(context["ev_vehicle_width_error"], "±0,3 мм")
+		self.assertAlmostEqual(context["ev_vehicle_width_u"], 0.2857884, places=6)
+		self.assertAlmostEqual(context["ev_vehicle_height_ub"], 1.1902381, places=6)
+		# Стенд: 5 % от 490 Н плюс цена деления 1 Н.
+		self.assertAlmostEqual(context["ev_service_control_force_axle1_ub"], 14.1480270, places=6)
+		# Не измерено — прочерк.
+		self.assertEqual(context["ev_co_max_x"], "-")
+		self.assertEqual(context["ev_co_max_u"], "-")
+		# Дымность: 3 замера, uA по типу А.
+		self.assertEqual(context["ev_light_absorption_n"], 3)
+		self.assertAlmostEqual(context["ev_light_absorption_x"], 0.22, places=6)
+		self.assertAlmostEqual(context["ev_light_absorption_ua"], 0.0115470, places=6)
+		self.assertEqual(context["ev_vehicle_length_33987_u"], context["ev_vehicle_length_u"])
+
+	def test_evaluation_conditions_follow_vehicle(self):
+		petrol = build_evaluation_context(self.make_protocol())
+		diesel = build_evaluation_context(self.make_protocol("hybrid_diesel", rear_fog_count=2))
+		electric = build_evaluation_context(self.make_protocol("electric", rear_fog_count=0))
+
+		self.assertEqual((petrol["ev_petrol_like"], petrol["ev_diesel_like"]), (True, False))
+		self.assertEqual((diesel["ev_petrol_like"], diesel["ev_diesel_like"]), (False, True))
+		self.assertFalse(electric["ev_not_electric"])
+		self.assertEqual((petrol["ev_rear_fog_present"], petrol["ev_rear_fog_two_lamps"]), (True, False))
+		self.assertTrue(diesel["ev_rear_fog_two_lamps"])
+		self.assertFalse(electric["ev_rear_fog_present"])
+		self.assertFalse(petrol["ev_front_fog_present"])
+		self.assertFalse(petrol["ev_winter_tires"])
+		self.assertTrue(petrol["ev_parking_control_force_applicable"])
+
+		# Ширина полосы 0 — полосы нет, как в протоколе.
+		for width, present in ((None, False), (Decimal("0"), False), (Decimal("90"), True)):
+			with self.subTest(sun_strip=width):
+				protocol = self.make_protocol()
+				protocol.measurement.sun_strip_width_mm = width
+				self.assertEqual(build_evaluation_context(protocol)["ev_sun_strip_present"], present)
+
+	def test_template_has_placeholders_for_every_row(self):
+		sheet = load_workbook(Path(__file__).parent / "templates" / "evaluation_sheet_template.xlsx").active
+		text = " ".join(str(cell.value) for row in sheet.iter_rows() for cell in row if cell.value is not None)
+		for row in EVALUATION_ROWS:
+			with self.subTest(row=row.key):
+				for suffix in ("x", "ua", "ub", "uc", "u", "error", "n"):
+					self.assertIn(f"{{{{ ev_{row.key}_{suffix} }}}}", text)
+
 class ProtocolApplicabilityTests(SimpleTestCase):
 	def test_tire_depth_1072_is_always_output_and_1073_is_winter_only(self):
 		measurement = SimpleNamespace(
@@ -1448,6 +1628,10 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 				self.assertEqual(values["winter_tires_present"], winter_present)
 				self.assertEqual(values["tire_depth_fl_10_7_2"], "5,6 мм")
 				self.assertIn("5,6 мм ± 0,05 мм", values["full_result_a_10_7_2"])
+				self.assertNotIn("мм мм", values["full_result_a_10_7_2"])
+				self.assertNotIn("мм мм", values["full_result_a_10_7_3"])
+				if season == "winter":
+					self.assertIn("Переднее левое: 5,6 мм ± 0,05 мм", values["full_result_a_10_7_3"])
 
 				if season == "summer":
 					self.assertEqual(
@@ -1555,6 +1739,43 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 		self.assertEqual(present["rear_fog_a_8_13_2_status"], "соответствует")
 		self.assertIn("Результат:", present["rear_fog_a_8_13_2_conclusion"])
 		self.assertIn("±", present["rear_fog_a_8_13_2_conclusion"])
+
+	def test_rear_fog_8_13_2_conditions_and_values_for_one_and_two_lamps(self):
+		def values(count):
+			return build_rear_fog_values(SimpleNamespace(
+				rear_fog_count=count,
+				rear_fog_upper_point_mm=945,
+				rear_fog_lower_point_mm=855,
+			))
+
+		one, two, none = values(1), values(2), values(0)
+
+		self.assertEqual((one["a_8_13_2_one_lamp"], one["a_8_13_2_two_lamps"]), (True, False))
+		self.assertEqual((two["a_8_13_2_one_lamp"], two["a_8_13_2_two_lamps"]), (False, True))
+		self.assertEqual((none["a_8_13_2_one_lamp"], none["a_8_13_2_two_lamps"]), (False, False))
+
+		# Правый фонарь повторяет значения левого.
+		self.assertEqual(two["a_8_13_2_left_lower_point_value"], "855,00 мм")
+		self.assertEqual(two["a_8_13_2_right_lower_point_value"], "855,00 мм")
+		self.assertEqual(two["a_8_13_2_left_upper_point_value"], "945,00 мм")
+		self.assertEqual(two["a_8_13_2_right_upper_point_value"], "945,00 мм")
+
+		two_lamps_result = "\n".join((
+			"Результат:",
+			"Левая нижняя граница: 855,00 мм ± 0,29 мм",
+			"Левая верхняя граница: 945,00 мм ± 0,29 мм",
+			"Правая нижняя граница: 855,00 мм ± 0,29 мм",
+			"Правая верхняя граница: 945,00 мм ± 0,29 мм",
+		))
+		self.assertIn(two_lamps_result, two["rear_fog_a_8_13_2_conclusion"])
+
+		one_lamp_result = "\n".join((
+			"Результат:",
+			"Верхняя граница: 945,00 мм ± 0,29 мм",
+			"Нижняя граница: 855,00 мм ± 0,29 мм",
+		))
+		self.assertIn(one_lamp_result, one["rear_fog_a_8_13_2_conclusion"])
+		self.assertEqual(none["rear_fog_a_8_13_2_conclusion"], "-")
 
 	def test_dynamic_non_applicability_statuses_use_excel_messages(self):
 		values = build_dynamic_result_values(
@@ -1687,8 +1908,25 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 				SimpleNamespace(),
 				{},
 			)["applicable_21_3"],
-			"не указано",
+			"не применяется (ТС категории М1 массой менее 3,5 т)",
 		)
+		for fuel_type, expected in (
+			("petrol", "не применяется (ТС оборудовано только бензиновым двигателем)"),
+			("hybrid_petrol", "не применяется (ТС оборудовано только бензиновым двигателем)"),
+			("electric", "не применяется (ТС оборудовано только электродвигателем)"),
+			("diesel", "не применяется (ТС категории М1 массой менее 3,5 т)"),
+			("hybrid_diesel", "не применяется (ТС категории М1 массой менее 3,5 т)"),
+		):
+			with self.subTest(fuel_type=fuel_type):
+				self.assertEqual(
+					build_applicability_values(
+						SimpleNamespace(vehicle_category="M1"),
+						SimpleNamespace(fuel_type=fuel_type),
+						SimpleNamespace(),
+						{},
+					)["applicable_21_3"],
+					expected,
+				)
 		self.assertEqual(
 			values["applicable_8_20_3"],
 			"не применяется (ТС не оснащено устройствами фароочистки  и "
@@ -1770,7 +2008,8 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			("electric", True),
 			("petrol", False),
 			("diesel", False),
-			("hybrid", False),
+			("hybrid_petrol", False),
+			("hybrid_diesel", False),
 			(None, False),
 		):
 			with self.subTest(fuel_type=fuel_type):
@@ -2007,7 +2246,9 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			("petrol", 2999, "не применяется (пробег ТС менее 3000 км)", "не применяется (пробег ТС менее 3000 км)"),
 			("petrol", 3000, "соответствует", "не применяется (ТС оборудовано бензиновым двигателем)"),
 			("diesel", 3000, "не применяется (ТС оборудовано дизельным двигателем)", "соответствует"),
-			("hybrid", 3000, "соответствует", "не применяется (ТС оборудовано бензиновым двигателем)"),
+			# Гибрид-бензин — как бензин, гибрид-дизель — как дизель.
+			("hybrid_petrol", 3000, "соответствует", "не применяется (ТС оборудовано бензиновым двигателем)"),
+			("hybrid_diesel", 3000, "не применяется (ТС оборудовано дизельным двигателем)", "соответствует"),
 			(None, None, "соответствует", "соответствует"),
 		]
 
@@ -2109,6 +2350,24 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 				message = str(serializer.errors["axle1_load_kg"][0])
 				self.assertIn("950–990 кг", message)
 				self.assertIn("массы Drom с учетом мест", message)
+
+	def test_measurer_save_skips_drom_mass_range_check(self):
+		data = {"vehicle_weight_kg": "700", "seats_count": "2/2", "axle1_load_kg": "500", "axle2_load_kg": "600"}
+
+		measurer = ProtocolMeasurementSerializer(data=data, partial=True, context={"skip_drom_mass_check": True})
+		self.assertTrue(measurer.is_valid(), measurer.errors)
+
+		operator = ProtocolMeasurementSerializer(data=data, partial=True)
+		self.assertFalse(operator.is_valid())
+		self.assertIn("axle1_load_kg", operator.errors)
+
+	def test_fuel_type_from_catalog_splits_hybrids(self):
+		normalize = ProtocolCreateSerializer().normalize_fuel_type
+		self.assertEqual(normalize("Гибрид"), "hybrid_petrol")
+		self.assertEqual(normalize("гибрид (бензин)"), "hybrid_petrol")
+		self.assertEqual(normalize("Гибрид дизель"), "hybrid_diesel")
+		self.assertEqual(normalize("Бензин"), "petrol")
+		self.assertEqual(normalize("Дизель"), "diesel")
 
 	def test_mass_range_is_checked_only_when_axles_are_in_request(self):
 		measurement = SimpleNamespace(
@@ -2404,10 +2663,14 @@ class ProtocolCalculationTests(TestCase):
 		self.assertGreater(u_glass_transparency_pct(), old_glass)
 		self.assertGreater(u_speed_kmh(Decimal("20")), old_speed)
 
-	def test_scale_uncertainty_includes_resolution_component(self):
-		old_scale = Decimal("1.65") * Decimal("5") / Decimal("3").sqrt()
-
-		self.assertGreater(u_scale_kg(), old_scale)
+	def test_axle_load_uncertainty_uses_brake_stand(self):
+		# Стенд: ±3 % и цена деления 1 кг; 995 кг -> uB = 17,2363 (в прототипе без цены деления 17,2339), U = 28,44.
+		self.assertAlmostEqual(float(u_axle_load_kg(Decimal("995")) / Decimal("1.65")), 17.2363, places=3)
+		self.assertEqual(
+			build_uncertainty_values(SimpleNamespace(measurement=SimpleNamespace(axle1_load_kg=Decimal("900"))))["u_axle1_load_kg"],
+			"25,73",
+		)
+		self.assertIsNone(u_axle_load_kg(None))
 
 	def test_steering_and_height_uncertainties_use_new_instrument_components(self):
 		old_steering = Decimal("1.65") * Decimal("0.5") / Decimal("3").sqrt()
@@ -2438,3 +2701,27 @@ class ProtocolDocxConditionalRowTests(SimpleTestCase):
 				[row.cells[0].text for row in document.tables[0].rows],
 				[expected],
 			)
+
+	def test_table_row_elif_renders_first_matching_branch(self):
+		cases = (
+			({"one": True, "two": False}, ["один", "после"]),
+			({"one": False, "two": True}, ["два", "после"]),
+			({"one": False, "two": False}, ["нет", "после"]),
+			# Если истинны оба, срабатывает только первая ветка.
+			({"one": True, "two": True}, ["один", "после"]),
+		)
+		for context, expected in cases:
+			with self.subTest(context=context):
+				document = Document()
+				table = document.add_table(rows=8, cols=1)
+				for index, text in enumerate((
+					"{%tr if one %}", "один",
+					"{%tr elif two %}", "два",
+					"{%tr else %}", "нет",
+					"{%tr endif %}", "после",
+				)):
+					table.cell(index, 0).text = text
+
+				process_document_conditions(document, context)
+
+				self.assertEqual([row.cells[0].text for row in document.tables[0].rows], expected)

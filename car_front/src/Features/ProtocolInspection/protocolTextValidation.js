@@ -1,5 +1,7 @@
 const VIN_FIELD_MAX_LENGTH = 17;
-const TIRE_MARKING_MAX_LENGTH = 10;
+// Маркировку шин вводят руками как есть (165/70 R17, 165R13LT-6PR, 6.00-12-4PR …),
+// ограничение — только длина поля в БД.
+const TIRE_MARKING_MAX_LENGTH = 100;
 const TIRE_MARKING_FIELDS = new Set(["tire_marking_front", "tire_marking_rear"]);
 
 export function normalizeProtocolTextField(fieldName, value) {
@@ -7,24 +9,7 @@ export function normalizeProtocolTextField(fieldName, value) {
     return typeof value === "string" ? value.toUpperCase() : value;
   }
 
-  if (!TIRE_MARKING_FIELDS.has(fieldName) || value === null || value === undefined) {
-    return value;
-  }
-
-  const original = String(value).trim();
-  if (!original || original === "-") return original;
-
-  const digits = original.replace(/\D/g, "");
-  if (!digits) return "";
-
-  const width = digits.slice(0, 3);
-  if (digits.length < 3) return width;
-
-  const profile = digits.slice(3, 5);
-  const base = `${width}/${profile}`;
-  if (digits.length < 5) return base;
-
-  return `${base} R${digits.slice(5)}`;
+  return value;
 }
 
 export function getProtocolTextFieldError(fieldName, value) {
