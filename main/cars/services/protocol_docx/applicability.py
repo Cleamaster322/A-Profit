@@ -329,6 +329,13 @@ def build_applicability_values(protocol, measurement, light, dynamic_values):
     if category in {"M1", "N1"}:
         set_value("a_11_16", reason("a_11_16"))
 
+    # А.18.4.2 / А.18.4.4: «да» — соответствует, иначе «не применяется (на ТС отсутствуют ...)».
+    for code, field in (
+        ("a_18_4_2", "roof_protruding_elements_present"),
+        ("a_18_4_4", "roof_rails_ribs_present"),
+    ):
+        set_value(code, "соответствует" if getattr(measurement, field, None) is True else reason(code))
+
     if electric:
         set_value("a_23_1", reason("a_23_1"))
     elif fuel_type in {"petrol", "diesel", "hybrid_petrol", "hybrid_diesel"}:

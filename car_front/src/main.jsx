@@ -10,6 +10,7 @@ import Protocols from "./Pages/Protocols.jsx";
 import CompletedProtocols from "./Pages/CompletedProtocols.jsx";
 import ProtocolInspection from "./Pages/ProtocolInspection.jsx";
 import Employees from "./Pages/Employees.jsx";
+import EquipmentVerifications from "./Pages/EquipmentVerifications.jsx";
 import { BrowserRouter, Route, Routes } from "react-router-dom";
 import ApprovedProtocols from "./Pages/ApprovedProtocols.jsx";
 import ProtocolVehicleSelection from "./Pages/ProtocolVehicleSelection.jsx";
@@ -32,6 +33,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(
                 <Route path="/measurement" element={<MeasurementDashboard />} />
                 <Route path="/measurement/:id" element={<MeasurementReadOnly />} />
                 <Route path="/employees" element={<Employees />} />
+                <Route path="/equipment-verifications" element={<EquipmentVerifications />} />
             </Routes>
         </BrowserRouter>
     </ThemeProvider>

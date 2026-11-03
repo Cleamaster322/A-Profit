@@ -1,3 +1,4 @@
+import json
 import logging
 import mimetypes
 import shutil
@@ -11,12 +12,15 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
 from django.http import FileResponse, HttpResponse
+from django.views.decorators.csrf import csrf_exempt
 from django.middleware.csrf import get_token
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, BasePermission, IsAuthenticated
 from rest_framework.response import Response
-from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework.exceptions import AuthenticationFailed
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework_simplejwt.exceptions import InvalidToken, TokenError
 from rest_framework_simplejwt.tokens import RefreshToken
 from pathlib import Path
 
@@ -28,6 +32,8 @@ from .models import (
     Generation,
     Configuration,
     CarData,
+    Equipment,
+    EquipmentVerification,
     Protocol,
     ProtocolMeasurement,
     ProtocolBrake,
@@ -42,6 +48,7 @@ from .pagination import Pagination
 from .photo_slots import PHOTO_SLOT_ORDER, PHOTO_SLOT_TITLES, photo_slots_payload, slot_photos
 from .serializers import (
     BrandSerializer,
+    EquipmentVerificationSerializer,
     ModelSerializer,
     GenerationSerializer,
     ConfigurationSerializer,
@@ -61,6 +68,11 @@ from .serializers import (
     UserSerializer,
     CreateUserSerializer,
     UpdateUserSerializer,
+)
+from .services.equipment_verification import (
+    MissingVerificationError,
+    verification_on,
+    verification_status,
 )
 from .services.protocol_docx_generator import generate_protocol_docx, generate_protocol_documents
 from .services.protocol_storage import (
@@ -265,7 +277,8 @@ class ProtocolAccessPermission(BasePermission):
         if path.endswith('/return-to-draft') and protocol.status in {'approved', 'cancelled'}:
             return is_protocol_reviewer_or_superuser_request(request)
 
-        if path.endswith('/start-editing'):
+        # Занять протокол и продлить/вернуть блокировку: занят ли он другим, решает сам view.
+        if path.endswith(('/start-editing', '/heartbeat')):
             return protocol.status not in {'approved', 'cancelled'}
 
         if path.endswith('/generate-docx') or request.method == 'GET':
@@ -278,7 +291,8 @@ def protocol_access_required(view_func):
     view_func.cls.permission_classes = [IsAuthenticated, ProtocolAccessPermission]
     return view_func
 
-LOCK_TIMEOUT_MINUTES = 5
+# Heartbeat идет раз в 30 с: блокировка без него держится 2 минуты (4 пропуска).
+LOCK_TIMEOUT_MINUTES = 2
 
 
 def is_protocol_lock_expired(protocol):
@@ -1481,8 +1495,8 @@ def create_protocol(request):
         # потому что нужен id протокола.
         data.pop('protocol_number', None)
 
-        if not data.get('protocol_date'):
-            data['protocol_date'] = str(date.today())
+        # Дата отбора — день создания протокола замерщиком; с сайта не задается.
+        data['protocol_date'] = str(timezone.localdate())
 
         if not data.get('owner_name'):
             data['owner_name'] = ''
@@ -1634,23 +1648,68 @@ def protocol_heartbeat(request, pk):
             if not user_can_access_protocol(request, protocol):
                 return Response(status=status.HTTP_403_FORBIDDEN)
 
-            if protocol.locked_by_id != request.user.id:
-                return Response(
-                    {'detail': 'Протокол занят другим пользователем.'},
-                    status=status.HTTP_403_FORBIDDEN
-                )
+            lock_restored = protocol.locked_by_id != request.user.id
+            if lock_restored:
+                # Блокировка пропала (вкладку перезагрузили, телефон «уснул») — возвращаем ее,
+                # если протокол за это время никто другой не занял.
+                if protocol.locked_by_id and not is_protocol_lock_expired(protocol):
+                    return Response(
+                        {'detail': 'Протокол занят другим пользователем.'},
+                        status=status.HTTP_403_FORBIDDEN
+                    )
+                protocol.locked_by = request.user
 
             protocol.locked_at = timezone.now()
-            protocol.save(update_fields=['locked_at'])
+            protocol.save(update_fields=['locked_by', 'locked_at'])
+
+        if lock_restored:
+            notify_protocol_status_changed(protocol)
 
         return Response({
             'status': protocol.status,
             'locked_at': protocol.locked_at,
+            'lock_restored': lock_restored,
         })
 
     except Exception:
         logger.exception('Unhandled exception in cars API')
         return internal_server_error()
+
+
+@csrf_exempt
+def release_protocol_lock_beacon(request, pk):
+    """
+    Снятие блокировки при закрытии вкладки (navigator.sendBeacon из ProtocolInspection).
+
+    Beacon не умеет передавать заголовок Authorization, поэтому access-токен приходит
+    в теле ({"token": ...}). Снимается только блокировка самого пользователя.
+    """
+    if request.method != 'POST':
+        return HttpResponse(status=405)
+
+    try:
+        raw_token = json.loads(request.body or b'{}').get('token')
+        authentication = JWTAuthentication()
+        user = authentication.get_user(authentication.get_validated_token(raw_token))
+    except (ValueError, AttributeError, InvalidToken, TokenError, AuthenticationFailed):
+        return HttpResponse(status=401)
+
+    with transaction.atomic():
+        protocol = (
+            Protocol.objects
+            .select_for_update()
+            .filter(pk=pk, locked_by_id=user.id)
+            .first()
+        )
+        if protocol:
+            protocol.locked_by = None
+            protocol.locked_at = None
+            protocol.save(update_fields=['locked_by', 'locked_at'])
+
+    if protocol:
+        notify_protocol_status_changed(protocol)
+
+    return HttpResponse(status=204)
 
 
 @api_view(['POST'])
@@ -2952,14 +3011,24 @@ def generate_protocol_docx_file(request, protocol_id):
             return Response(status=status.HTTP_403_FORBIDDEN)
 
         # Кнопка «Сформировать»: все документы протокола сохраняются в его папку,
-        # в браузер ничего не скачивается.
-        result = generate_protocol_documents(protocol)
+        # в браузер ничего не скачивается. Без действующих поверок — только admin.
+        try:
+            result = generate_protocol_documents(
+                protocol,
+                allow_missing_verifications=is_superuser_request(request),
+            )
+        except MissingVerificationError as error:
+            return Response(
+                {'detail': str(error), 'code': 'verification_missing'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         data = {
             'folder': str(result['folder']),
             'files': [path.name for path in result['files']],
             'skipped': result['skipped'],
             'errors': result['errors'],
             'warnings': result['warnings'],
+            'first_generated_date': protocol.first_generated_date,
         }
 
         if result['errors']:
@@ -3028,3 +3097,82 @@ def preview_protocol_pdf_file(request, protocol_id):
             cleanup_pdf_preview(temp_dir)
         logger.exception('Unhandled exception in protocol PDF preview')
         return internal_server_error()
+
+
+# =========================================================
+# --- ПОВЕРКИ ОБОРУДОВАНИЯ ---
+# Страница «Поверки оборудования»: только исполнительный директор и admin.
+# =========================================================
+
+def equipment_payload(equipment, today):
+    verifications = list(equipment.verifications.all())
+    current = verification_on(verifications, today)
+    status_value = verification_status(current, today)
+
+    if current is None:
+        status_value = 'expired' if any(item.end_date < today for item in verifications) else 'missing'
+    elif status_value == 'expiring':
+        # Новую поверку уже внесли — предупреждать не о чем.
+        next_day = current.end_date + timedelta(days=1)
+        if any(item.id != current.id and item.start_date <= next_day <= item.end_date for item in verifications):
+            status_value = 'active'
+
+    return {
+        'id': equipment.id,
+        'code': equipment.code,
+        'name': equipment.name,
+        'kind': equipment.kind,
+        'status': status_value,
+        'current_verification_id': current.id if current else None,
+        'verifications': EquipmentVerificationSerializer(verifications, many=True).data,
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_equipment_verifications(request):
+    if not is_executive_director_or_superuser_request(request):
+        return Response(status=status.HTTP_403_FORBIDDEN)
+
+    today = timezone.localdate()
+    equipment = Equipment.objects.prefetch_related('verifications')
+    return Response([equipment_payload(item, today) for item in equipment])
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def create_equipment_verification(request, equipment_id):
+    if not is_executive_director_or_superuser_request(request):
+        return Response(status=status.HTTP_403_FORBIDDEN)
+
+    equipment = Equipment.objects.filter(pk=equipment_id).first()
+    if not equipment:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    serializer = EquipmentVerificationSerializer(data=request.data)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer.save(equipment=equipment, created_by=request.user)
+    equipment = Equipment.objects.prefetch_related('verifications').get(pk=equipment.pk)
+    return Response(equipment_payload(equipment, timezone.localdate()), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def update_equipment_verification(request, verification_id):
+    # Исправление ошибочной записи; удаления нет — история нужна для старых протоколов.
+    if not is_executive_director_or_superuser_request(request):
+        return Response(status=status.HTTP_403_FORBIDDEN)
+
+    verification = EquipmentVerification.objects.filter(pk=verification_id).first()
+    if not verification:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    serializer = EquipmentVerificationSerializer(verification, data=request.data, partial=True)
+    if not serializer.is_valid():
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    serializer.save()
+    equipment = Equipment.objects.prefetch_related('verifications').get(pk=verification.equipment_id)
+    return Response(equipment_payload(equipment, timezone.localdate()))

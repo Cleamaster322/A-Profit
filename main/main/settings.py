@@ -174,7 +174,8 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'ru-ru'
 
-TIME_ZONE = 'UTC'
+# Лаборатория во Владивостоке: даты отбора/протокола и имена папок — по местному времени.
+TIME_ZONE = 'Asia/Vladivostok'
 
 USE_I18N = True
 

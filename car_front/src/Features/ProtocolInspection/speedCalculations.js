@@ -7,5 +7,5 @@ export function calculateMeasuredSpeedKmh(speedometerValue) {
   const speedometerSpeed = Number(normalized);
   if (!Number.isFinite(speedometerSpeed)) return "";
 
-  return (Math.round(speedometerSpeed * 0.95 * 10) / 10).toFixed(1);
+  return (Math.round(speedometerSpeed * 0.95 * 100) / 100).toFixed(2);
 }

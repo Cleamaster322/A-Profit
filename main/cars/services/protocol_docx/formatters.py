@@ -1,4 +1,4 @@
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 
 def is_empty(value):
@@ -27,10 +27,35 @@ def fmt_num(value, digits=1, default=""):
     if number is None:
         return default
 
-    quant = Decimal("1") if digits == 0 else Decimal("1." + ("0" * digits))
-    number = number.quantize(quant)
+    number = round_half_up(number, digits)
 
     return str(number).replace(".", ",")
+
+
+def round_half_up(value, digits):
+    """Округление по обычной математике: 2,5 -> 3, 1,155 -> 1,16."""
+    number = decimal_value(value)
+
+    if number is None:
+        return None
+
+    quant = Decimal("1") if digits == 0 else Decimal("1." + ("0" * digits))
+    return number.quantize(quant, rounding=ROUND_HALF_UP)
+
+
+def fmt_rounded(value, digits, shown_digits, default=""):
+    """
+    Округлить до digits знаков и записать с shown_digits знаками.
+
+    Разность тормозных сил: прибор дает целые -> 6,25 -> «6,00».
+    Удельная тормозная сила: до сотых, запись до тысячных -> 1,156 -> «1,160».
+    """
+    number = round_half_up(value, digits)
+
+    if number is None:
+        return default
+
+    return fmt_num(number, shown_digits)
 
 
 def fmt_int(value, default=""):

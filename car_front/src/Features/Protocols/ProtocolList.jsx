@@ -101,6 +101,7 @@ function getProtocolTitle(protocol) {
 
 function ProtocolCard({
                           protocol,
+                          currentUserId,
                           onOpen,
                           onReleaseLock,
                           onApprove,
@@ -109,6 +110,8 @@ function ProtocolCard({
                           showReviewActions,
                       }) {
     const isLocked = Boolean(protocol.locked_by_id || protocol.locked_by);
+    // Свой протокол (например, после закрытия вкладки) можно открыть: сервер продлит блокировку.
+    const lockedByOther = isLocked && (protocol.locked_by_id ?? protocol.locked_by) !== currentUserId;
     const isReturnedForRevision = Boolean(protocol.returned_for_revision);
 
     return (
@@ -235,19 +238,19 @@ function ProtocolCard({
                 <Button
                     onClick={() => onOpen(protocol)}
                     variant="contained"
-                    disabled={isLocked}
+                    disabled={lockedByOther}
                     sx={{
-                        bgcolor: isLocked ? "#d0d0d0" : "black",
-                        color: isLocked ? "#666666" : "white",
+                        bgcolor: lockedByOther ? "#d0d0d0" : "black",
+                        color: lockedByOther ? "#666666" : "white",
                         textTransform: "none",
                         borderRadius: 0,
                         px: 2.5,
                         py: 0.8,
                         fontWeight: 700,
                         boxShadow: "none",
-                        border: isLocked ? "1px solid #999999" : "1px solid black",
+                        border: lockedByOther ? "1px solid #999999" : "1px solid black",
                         "&:hover": {
-                            bgcolor: isLocked ? "#d0d0d0" : "#222",
+                            bgcolor: lockedByOther ? "#d0d0d0" : "#222",
                             boxShadow: "none",
                         },
                         "&.Mui-disabled": {
@@ -257,7 +260,7 @@ function ProtocolCard({
                         },
                     }}
                 >
-                    {isLocked ? "В работе" : "Открыть"}
+                    {lockedByOther ? "В работе" : "Открыть"}
                 </Button>
 
                 {isLocked && canManageProtocols && (
@@ -416,11 +419,28 @@ function ProtocolList({
             loadProtocols({silent: true});
         };
 
+        // Просроченные блокировки (закрыли браузер на телефоне, пропала сеть) сервер снимает
+        // при загрузке списка — обновляем его раз в минуту и при возврате на вкладку.
+        const pollTimer = setInterval(() => {
+            if (document.visibilityState === "visible") {
+                loadProtocols({silent: true});
+            }
+        }, 60000);
+
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === "visible") {
+                loadProtocols({silent: true});
+            }
+        };
+
         window.addEventListener("focus", handleWindowFocus);
+        document.addEventListener("visibilitychange", handleVisibilityChange);
 
         return () => {
             clearTimeout(refreshTimer);
+            clearInterval(pollTimer);
             window.removeEventListener("focus", handleWindowFocus);
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
         };
     }, [loadCurrentUser, loadProtocols]);
 
@@ -887,6 +907,7 @@ function ProtocolList({
                                 >
                                     <ProtocolCard
                                         protocol={protocol}
+                                        currentUserId={currentUser?.id}
                                         onOpen={handleOpen}
                                         onReleaseLock={handleManagerReleaseLock}
                                         onApprove={handleApproveProtocol}

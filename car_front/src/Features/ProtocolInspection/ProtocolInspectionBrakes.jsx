@@ -121,7 +121,8 @@ function ProtocolInspectionBrakes({
                     md: 4,
                 })}
 
-                {renderField({
+                {/* Электрический (кнопочный) стояночный тормоз: усилие не измеряется (п. А.5.1.5 не применяется). */}
+                {form.parking_brake_type !== "electric" && renderField({
                     form,
                     handleChange,
                     textFieldSx,

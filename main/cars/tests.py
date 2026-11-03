@@ -1,6 +1,8 @@
 from datetime import date
 from decimal import Decimal
 from io import StringIO
+import importlib
+import json
 import os
 import re
 import shutil
@@ -20,6 +22,7 @@ from docx import Document
 from PIL import Image
 from openpyxl import Workbook, load_workbook
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
 
 from .models import (
 	Brand,
@@ -30,6 +33,8 @@ from .models import (
 	Protocol,
 	ProtocolBrake,
 	ProtocolMeasurement,
+	Equipment,
+	EquipmentVerification,
 	ProtocolFormSettings,
 	ProtocolPhoto,
 	ProtocolStorageSettings,
@@ -50,6 +55,9 @@ from .services.protocol_docx.calculations import (
 	count_seats,
 	format_mass_kg,
 	get_vehicle_mass_for_brake_calc,
+	rgk_r5_abs_error_mm,
+	u_bumper_distance_mm,
+	u_linear_by_value_mm,
 	calc_light_absorption_uncertainty,
 	calc_axle_load_sum_kg,
 	standard_headlight_uncertainty_cd,
@@ -63,6 +71,14 @@ from .services.protocol_docx.calculations import (
 	u_vehicle_height_mm,
 )
 from .services.evaluation_sheet import EVALUATION_ROWS, build_evaluation_context
+from .services.tech_record_table import render_tech_record_table
+from .services.equipment_verification import (
+	build_equipment_verification_values,
+	format_verification,
+	verification_end_date,
+	verification_on,
+)
+from .services.protocol_docx.formatters import fmt_num, fmt_rounded
 from .services.protocol_docx_generator import generate_protocol_docx
 from .services.xlsx_renderer import render_xlsx
 from .services.protocol_storage import (
@@ -79,6 +95,7 @@ from .services.protocol_docx.context import (
 	build_light_device_row_values,
 	build_dynamic_result_values,
 	build_eco_values,
+	build_parking_control_force_values,
 	build_front_fog_values,
 	build_rear_fog_values,
 	build_tire_depth_values,
@@ -376,6 +393,48 @@ class ProtocolWorkflowTests(TestCase):
 		response = self.post(f"/cars/protocols/{self.protocol.id}/heartbeat/")
 
 		self.assertEqual(response.status_code, 403)
+
+	def test_heartbeat_restores_lost_lock_when_protocol_is_free(self):
+		self.authenticate(self.measurer)
+		self.assertEqual(
+			self.post(f"/cars/protocols/{self.protocol.id}/start-editing/").status_code,
+			200,
+		)
+		# Блокировку сняли (beacon при перезагрузке, истекла и т. п.), протокол никто не занял.
+		Protocol.objects.filter(pk=self.protocol.pk).update(locked_by=None, locked_at=None)
+
+		response = self.post(f"/cars/protocols/{self.protocol.id}/heartbeat/")
+
+		self.assertEqual(response.status_code, 200)
+		self.assertTrue(response.data["lock_restored"])
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.locked_by_id, self.measurer.id)
+
+	def release_lock_beacon(self, token):
+		return self.client.post(
+			f"/cars/protocols/{self.protocol.id}/release-lock/",
+			data=json.dumps({"token": token}),
+			content_type="text/plain",
+		)
+
+	def test_release_lock_beacon_releases_only_own_lock(self):
+		self.authenticate(self.measurer)
+		self.assertEqual(
+			self.post(f"/cars/protocols/{self.protocol.id}/start-editing/").status_code,
+			200,
+		)
+		self.client.force_authenticate(user=None)
+
+		self.assertEqual(self.release_lock_beacon("not-a-token").status_code, 401)
+		other_token = str(RefreshToken.for_user(self.operator).access_token)
+		self.assertEqual(self.release_lock_beacon(other_token).status_code, 204)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.locked_by_id, self.measurer.id)
+
+		owner_token = str(RefreshToken.for_user(self.measurer).access_token)
+		self.assertEqual(self.release_lock_beacon(owner_token).status_code, 204)
+		self.protocol.refresh_from_db()
+		self.assertIsNone(self.protocol.locked_by_id)
 
 	def test_reviewer_can_release_another_users_lock(self):
 		self.authenticate(self.measurer)
@@ -962,7 +1021,7 @@ class ProtocolFileStorageTests(TestCase):
 			locked_at=timezone.now(),
 		)
 		# Папка «<номер> <VIN> <дата создания>», как при создании через сайт.
-		self.folder = f"00001 XW8ZZZ61ZEG000001 {timezone.now().astimezone().strftime('%d.%m.%Y')}"
+		self.folder = f"00001 XW8ZZZ61ZEG000001 {timezone.localdate().strftime('%d.%m.%Y')}"
 		self.protocol.files_folder = self.folder
 		self.protocol.save(update_fields=["files_folder"])
 
@@ -1306,10 +1365,8 @@ class ProtocolFileStorageTests(TestCase):
 			template.add_paragraph(f"{name}: {{{{ protocol_number }}}} {{{{ applicant_name }}}}")
 			template.save(templates_dir / f"{name}_template.docx")
 		if evaluation_sheet:
-			shutil.copy(
-				Path(__file__).parent / "templates" / "evaluation_sheet_template.xlsx",
-				templates_dir / "evaluation_sheet_template.xlsx",
-			)
+			for name in ("evaluation_sheet_template.xlsx", "tech_record_table_template.xlsx"):
+				shutil.copy(Path(__file__).parent / "templates" / name, templates_dir / name)
 
 	def generate_documents(self, templates_dir):
 		self.client.force_authenticate(user=self.measurer)
@@ -1338,7 +1395,10 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertEqual(response.data["folder"], str(self.in_progress / self.folder))
 		self.assertEqual(
 			response.data["files"],
-			["00001 Протокол.docx", "00001 Заявка.docx", "00001 Техзапись.docx", "00001 Лист оценки.xlsx"],
+			[
+				"00001 Протокол.docx", "00001 Заявка.docx", "00001 Техзапись.docx",
+				"00001 Лист оценки.xlsx", "00001 Таблица для техзаписи.xlsx",
+			],
 		)
 		self.assertEqual(response.data["skipped"], [])
 		# Страницы через Word считаются только для протокола.
@@ -1349,10 +1409,93 @@ class ProtocolFileStorageTests(TestCase):
 		)
 		self.assertEqual(
 			sorted(path.name for path in (self.in_progress / self.folder).iterdir()),
-			["00001 Заявка.docx", "00001 Лист оценки.xlsx", "00001 Протокол.docx", "00001 Техзапись.docx"],
+			[
+				"00001 Заявка.docx", "00001 Лист оценки.xlsx", "00001 Протокол.docx",
+				"00001 Таблица для техзаписи.xlsx", "00001 Техзапись.docx",
+			],
 		)
 		sheet = load_workbook(self.in_progress / self.folder / "00001 Лист оценки.xlsx").active
 		self.assertTrue(sheet["B1"].value.startswith("Лист оценки неопределенности к протоколу № 00001"))
+
+	def test_tech_record_table_puts_values_in_column_d(self):
+		protocol = SimpleNamespace(
+			measurement=SimpleNamespace(
+				fuel_type="diesel",
+				mileage_km=Decimal("50000"),
+				**{f"light_absorption_{index}": Decimal("1.18") for index in range(1, 6)},
+				light_absorption_6=None,
+			),
+			brake=SimpleNamespace(
+				service_brake_front_left_kn=Decimal("2.455"),
+				service_brake_rear_left_kn=Decimal("1.2"),
+				service_brake_front_right_kn=Decimal("2.4"),
+				service_brake_rear_right_kn=Decimal("1.1"),
+				parking_brake_left_kn=Decimal("0.9"),
+				parking_brake_right_kn=None,
+			),
+			light=SimpleNamespace(),
+		)
+		template = Path(__file__).parent / "templates" / "tech_record_table_template.xlsx"
+		diesel_path = self.temp / "diesel.xlsx"
+		render_tech_record_table(template, diesel_path, protocol)
+		sheet = load_workbook(diesel_path).active
+
+		self.assertEqual(sheet["C1"].value, "Левое переднее колесо ___ кН")
+		self.assertEqual(sheet["D1"].value, 2.46)
+		self.assertEqual(sheet["D6"].value, "-")
+		self.assertEqual(sheet["D7"].value, 1.18)
+		self.assertEqual(sheet["D12"].value, "-")
+
+		# Бензин: п. А.21.8 не применяется — строк дымности в бланке нет.
+		protocol.measurement.fuel_type = "petrol"
+		petrol_path = self.temp / "petrol.xlsx"
+		render_tech_record_table(template, petrol_path, protocol)
+		petrol = load_workbook(petrol_path).active
+		texts = [str(cell.value) for row in petrol.iter_rows() for cell in row if cell.value is not None]
+		self.assertFalse(any("Дымность" in text or "Замер" in text for text in texts))
+		self.assertEqual(petrol["D6"].value, "-")
+		self.assertTrue(all(merged.max_row <= 6 for merged in petrol.merged_cells.ranges))
+
+	def test_generate_requires_verification_on_sample_date_except_admin(self):
+		templates_dir = self.temp / "templates"
+		templates_dir.mkdir()
+		self.make_document_templates(templates_dir)
+		equipment = Equipment.objects.create(code="СИ035", name="Рулетка RGK R-5", kind="si", sort_order=1)
+		# Поверка начинается после даты отбора — на дату отбора действующей нет.
+		EquipmentVerification.objects.create(
+			equipment=equipment, number="С-АЭ/29-10-2026/ 569671631",
+			start_date=date(2026, 10, 29), months=12,
+		)
+		Protocol.objects.filter(pk=self.protocol.pk).update(protocol_date=date(2026, 10, 23))
+
+		response, _ = self.generate_documents(templates_dir)
+		self.assertEqual(response.status_code, 400)
+		self.assertEqual(response.data["code"], "verification_missing")
+		self.assertIn("СИ035", response.data["detail"])
+		self.protocol.refresh_from_db()
+		self.assertIsNone(self.protocol.first_generated_date)
+
+		self.client.force_authenticate(user=self.superuser)
+		with patch("cars.services.protocol_docx_generator.TEMPLATES_DIR", templates_dir), patch(
+			"cars.services.protocol_docx_generator.count_word_pages", return_value=1,
+		):
+			admin_response = self.post(f"/cars/protocols/{self.protocol.id}/generate-docx/")
+		self.assertEqual(admin_response.status_code, 200)
+		self.assertTrue(any("СИ035" in warning for warning in admin_response.data["warnings"]))
+
+	def test_first_generation_fixes_protocol_date(self):
+		templates_dir = self.temp / "templates"
+		templates_dir.mkdir()
+		self.make_document_templates(templates_dir)
+
+		response, _ = self.generate_documents(templates_dir)
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["first_generated_date"], timezone.localdate())
+
+		Protocol.objects.filter(pk=self.protocol.pk).update(first_generated_date=date(2026, 11, 1))
+		self.generate_documents(templates_dir)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.first_generated_date, date(2026, 11, 1))
 
 	def test_generate_skips_documents_without_template(self):
 		templates_dir = self.temp / "templates"
@@ -1369,6 +1512,7 @@ class ProtocolFileStorageTests(TestCase):
 				"Заявка (нет шаблона application_template.docx)",
 				"Техзапись (нет шаблона tech_record_template.docx)",
 				"Лист оценки (нет шаблона evaluation_sheet_template.xlsx)",
+				"Таблица для техзаписи (нет шаблона tech_record_table_template.xlsx)",
 			],
 		)
 
@@ -1394,12 +1538,18 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertIn("занят", response.data["detail"])
 		self.assertEqual(
 			response.data["files"],
-			["00001 Протокол.docx", "00001 Техзапись.docx", "00001 Лист оценки.xlsx"],
+			[
+				"00001 Протокол.docx", "00001 Техзапись.docx",
+				"00001 Лист оценки.xlsx", "00001 Таблица для техзаписи.xlsx",
+			],
 		)
 		self.assertEqual(busy.read_bytes(), b"opened in word")
 		self.assertEqual(
 			sorted(path.name for path in folder.iterdir()),
-			["00001 Заявка.docx", "00001 Лист оценки.xlsx", "00001 Протокол.docx", "00001 Техзапись.docx"],
+			[
+				"00001 Заявка.docx", "00001 Лист оценки.xlsx", "00001 Протокол.docx",
+				"00001 Таблица для техзаписи.xlsx", "00001 Техзапись.docx",
+			],
 		)
 
 	def test_manufacture_year_comes_from_selected_manufacture_date(self):
@@ -1486,6 +1636,130 @@ class ProtocolFileStorageTests(TestCase):
 		self.assertTrue((self.in_progress / self.folder / photo.file_path).exists())
 
 
+class EquipmentVerificationTests(TestCase):
+	def setUp(self):
+		self.client = APIClient()
+		self.equipment = Equipment.objects.create(
+			code="СИ028", name="Течеискатель-сигнализатор ФП 12", kind="si", sort_order=1,
+		)
+		self.old = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="С-АЭ/03-12-2025/ 486235847",
+			start_date=date(2025, 12, 3), months=12,
+		)
+
+	def test_end_date_is_start_plus_months_minus_one_day(self):
+		self.assertEqual(verification_end_date(date(2025, 12, 3), 12), date(2026, 12, 2))
+		self.assertEqual(verification_end_date(date(2024, 10, 31), 72), date(2030, 10, 30))
+		# Такого числа в месяце нет — до последнего дня месяца.
+		self.assertEqual(verification_end_date(date(2024, 2, 29), 12), date(2025, 2, 28))
+
+	def test_overlap_keeps_old_verification_while_it_is_valid(self):
+		new = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="С-АЭ/25-11-2026/ 1", start_date=date(2026, 11, 25), months=12,
+		)
+		items = [self.old, new]
+		self.assertEqual(verification_on(items, date(2026, 11, 28)), self.old)
+		self.assertEqual(verification_on(items, date(2026, 12, 2)), self.old)
+		self.assertEqual(verification_on(items, date(2026, 12, 3)), new)
+		self.assertIsNone(verification_on(items, date(2025, 12, 2)))
+
+	def test_document_text_and_placeholders(self):
+		self.assertEqual(
+			format_verification(self.equipment, self.old),
+			"Св-во №\nС-АЭ/03-12-2025/ 486235847\nот 03.12.2025 г.,\n12 мес.",
+		)
+		values, missing = build_equipment_verification_values(SimpleNamespace(protocol_date=date(2026, 1, 10)))
+		self.assertEqual(missing, [])
+		self.assertIn("486235847", values["eq_si028_verification"])
+
+		io = Equipment.objects.create(code="ИО007", name="Опорная поверхность ОП-1", kind="io", sort_order=2)
+		verification = EquipmentVerification.objects.create(
+			equipment=io, number="26/711", start_date=date(2026, 10, 6), months=12,
+		)
+		self.assertEqual(format_verification(io, verification), "Протокол\n№ 26/711\nот 06.10.2026 г.,\n12 мес.")
+
+	def test_initial_data_has_45_equipment_from_template(self):
+		migration = importlib.import_module("cars.migrations.0027_load_equipment")
+		self.assertEqual(len(migration.EQUIPMENT), 45)
+		codes = [row[0] for row in migration.EQUIPMENT]
+		self.assertEqual((codes[0], codes[-1]), ("СИ001", "ИО011"))
+		self.assertIn(
+			("СИ028", "si", "Течеискатель-сигнализатор ФП 12", 19, "С-АЭ/03-12-2025/ 486235847", "2025-12-03", 12),
+			migration.EQUIPMENT,
+		)
+
+	def test_only_executive_director_and_admin_manage_verifications(self):
+		measurer = User.objects.create_user(username="measurer", password="x")
+		measurer.groups.add(Group.objects.get_or_create(name="measurer")[0])
+		director = User.objects.create_user(username="director", password="x")
+		director.groups.add(Group.objects.get_or_create(name="executive_director")[0])
+
+		self.client.force_authenticate(user=measurer)
+		self.assertEqual(self.client.get("/cars/equipment/").status_code, 403)
+
+		self.client.force_authenticate(user=director)
+		listed = self.client.get("/cars/equipment/")
+		self.assertEqual(listed.status_code, 200)
+		self.assertEqual(listed.data[0]["code"], "СИ028")
+
+		created = self.client.post(
+			f"/cars/equipment/{self.equipment.id}/verifications/create/",
+			{"number": "С-АЭ/25-11-2026/ 2", "start_date": "2026-11-25", "months": 12},
+			format="json",
+		)
+		self.assertEqual(created.status_code, 201)
+		self.assertEqual(len(created.data["verifications"]), 2)
+		self.assertEqual(str(created.data["verifications"][-1]["end_date"]), "2027-11-24")
+
+		edited = self.client.patch(
+			f"/cars/equipment-verifications/{self.old.id}/update/", {"months": 24}, format="json",
+		)
+		self.assertEqual(edited.status_code, 200)
+		self.old.refresh_from_db()
+		self.assertEqual(self.old.months, 24)
+		self.assertEqual(
+			self.client.post(
+				f"/cars/equipment/{self.equipment.id}/verifications/create/",
+				{"number": " ", "start_date": "2026-11-25", "months": 0},
+				format="json",
+			).status_code,
+			400,
+		)
+
+
+class ProtocolRoundingTests(SimpleTestCase):
+	def test_rounding_is_half_up(self):
+		self.assertEqual(fmt_num(Decimal("2.345"), 2), "2,35")
+		self.assertEqual(fmt_num(Decimal("0.5"), 0), "1")
+		self.assertEqual(fmt_num(Decimal("2.5"), 0), "3")
+
+	def test_brake_difference_and_specific_force_formats(self):
+		# Разность: до целых, запись до сотых. Удельная сила: до сотых, запись до тысячных.
+		self.assertEqual(fmt_rounded(Decimal("6.25"), 0, 2), "6,00")
+		self.assertEqual(fmt_rounded(Decimal("7.5"), 0, 2), "8,00")
+		self.assertEqual(fmt_rounded(Decimal("1.156"), 2, 3), "1,160")
+		self.assertEqual(fmt_rounded(None, 2, 3), "")
+
+	def test_template_sides_and_protrusion_result(self):
+		document = zipfile.ZipFile(
+			Path(__file__).parent / "templates" / "protocol_template.docx"
+		).read("word/document.xml").decode("utf-8")
+		text = re.sub(r"<[^>]+>", "", document)
+
+		for prefix in ("a_8_9", "a_8_12_2"):
+			with self.subTest(prefix=prefix):
+				self.assertIn(
+					f"Левая нижняя граница:{{{{ {prefix}_lower_point_value }}}}", text)
+				self.assertIn(
+					f"Левая верхняя граница:{{{{ {prefix}_upper_point_value }}}}", text)
+				self.assertIn(
+					f"Правая нижняя граница:{{{{ {prefix}_lower_point_value }}}}", text)
+				self.assertIn(
+					f"Правая верхняя граница:{{{{ {prefix}_upper_point_value }}}}", text)
+		self.assertIn("{{ a_16_9_other_protrusion_result }}", text)
+		self.assertNotIn("a_16_9_other_protrusion_uncertainty", text)
+
+
 class EvaluationSheetTests(SimpleTestCase):
 	def make_template(self, path, rows):
 		workbook = Workbook()
@@ -1544,35 +1818,76 @@ class EvaluationSheetTests(SimpleTestCase):
 				light_absorption_5=None,
 				light_absorption_6=None,
 				axle1_load_kg=Decimal("995"),
+				speed_by_speedometer_kmh=Decimal("20"),
+				actual_speed_kmh=Decimal("19.0"),
 			),
 			brake=SimpleNamespace(
 				parking_brake_type="mechanical_hand",
 				service_brake_control_force_axle1_n=Decimal("490"),
 			),
-			light=SimpleNamespace(rear_fog_count=rear_fog_count, front_fog_count=0),
+			light=SimpleNamespace(
+				rear_fog_count=rear_fog_count,
+				front_fog_count=0,
+				turn_signal_frequency_hz=Decimal("1.4"),
+			),
 		)
 
 	def test_evaluation_values_match_excel_prototype(self):
 		context = build_evaluation_context(self.make_protocol())
 
+		# А.12.3: результат — фактическая скорость (спидометр × 0,95), а не скорость по спидометру.
+		self.assertAlmostEqual(context["ev_speed_x"], 19.0, places=6)
+		# А.8.22: в Гц погрешность ±0,1 Гц, в проблесках в минуту — ±6 (0,1 × 60), числа ×60 как в прототипе.
+		self.assertEqual(context["ev_turn_signal_hz_error"], "± 0,1 Гц")
+		self.assertEqual(context["ev_turn_signal_per_min_error"], "± 6 проблесков в минуту")
+		self.assertEqual(context["ev_hazard_per_min_error"], "± 6 проблесков в минуту")
+		# В ячейки идут числа, округленные как в протоколе: проблески в минуту — целые.
+		self.assertEqual(context["ev_turn_signal_per_min_x"], 84.0)
+		self.assertEqual(context["ev_turn_signal_per_min_ub"], 4.0)  # 3,8729833
+		self.assertEqual(context["ev_turn_signal_per_min_u"], 6.0)  # 6,3904225
+		self.assertEqual(context["ev_turn_signal_hz_u"], 0.1)  # 0,1065
+
 		self.assertEqual(context["protocol_number"], "00012")
-		# Рулетка: длина 4640 мм — интервал 4–5 м, Δ = 0,75 мм.
-		self.assertEqual(context["ev_vehicle_length_error"], "±0,75 мм")
-		self.assertAlmostEqual(context["ev_vehicle_length_ub"], 0.4330127, places=6)
-		self.assertAlmostEqual(context["ev_vehicle_length_u"], 0.7144710, places=6)
-		self.assertEqual(context["ev_vehicle_width_error"], "±0,3 мм")
-		self.assertAlmostEqual(context["ev_vehicle_width_u"], 0.2857884, places=6)
-		self.assertAlmostEqual(context["ev_vehicle_height_ub"], 1.1902381, places=6)
-		# Стенд: 5 % от 490 Н плюс цена деления 1 Н.
-		self.assertAlmostEqual(context["ev_service_control_force_axle1_ub"], 14.1480270, places=6)
+		# Рулетка (ГОСТ 7502-98): L — полные и неполные метры.
+		# Длина 4640 мм: L = 5, Δ = 0,90 мм; ширина 1780 мм: L = 2, Δ = 0,45 мм.
+		self.assertEqual(context["ev_vehicle_length_error"], "±0,9 мм")
+		self.assertEqual(context["ev_vehicle_length_ub"], 0.52)  # 0,5196152
+		self.assertEqual(context["ev_vehicle_length_u"], 0.86)  # 0,8573651
+		self.assertEqual(context["ev_vehicle_width_error"], "±0,45 мм")
+		self.assertEqual(context["ev_vehicle_width_u"], 0.43)  # 0,4286826
+		self.assertEqual(context["ev_vehicle_height_ub"], 1.19)  # 1,1902381
+		# Стенд: 5 % от 490 Н плюс цена деления 1 Н (14,1480270 — как J12 прототипа).
+		self.assertEqual(context["ev_service_control_force_axle1_ub"], 14.15)
 		# Не измерено — прочерк.
 		self.assertEqual(context["ev_co_max_x"], "-")
 		self.assertEqual(context["ev_co_max_u"], "-")
 		# Дымность: 3 замера, uA по типу А.
 		self.assertEqual(context["ev_light_absorption_n"], 3)
-		self.assertAlmostEqual(context["ev_light_absorption_x"], 0.22, places=6)
-		self.assertAlmostEqual(context["ev_light_absorption_ua"], 0.0115470, places=6)
+		self.assertEqual(context["ev_light_absorption_x"], 0.22)
+		self.assertEqual(context["ev_light_absorption_ua"], 0.01)  # 0,0115470
 		self.assertEqual(context["ev_vehicle_length_33987_u"], context["ev_vehicle_length_u"])
+
+	def test_brake_rows_are_rounded_like_protocol(self):
+		protocol = self.make_protocol()
+		protocol.brake.axle_1_brake_difference_pct = Decimal("6.25")
+		protocol.brake.axle_2_brake_difference_pct = Decimal("4.5")
+		context = build_evaluation_context(protocol)
+
+		# Разность тормозных сил — до целых по обычной математике.
+		self.assertEqual(context["ev_brake_difference_axle1_x"], 6.0)
+		self.assertEqual(context["ev_brake_difference_axle2_x"], 5.0)
+
+	def test_eco_rows_follow_protocol_mileage_rule(self):
+		protocol = self.make_protocol()
+		protocol.measurement.mileage_km = Decimal("2000")
+		self.assertFalse(build_evaluation_context(protocol)["ev_petrol_like"])
+
+		diesel = self.make_protocol("diesel")
+		diesel.measurement.mileage_km = Decimal("2000")
+		self.assertFalse(build_evaluation_context(diesel)["ev_diesel_like"])
+
+		protocol.measurement.mileage_km = Decimal("3000")
+		self.assertTrue(build_evaluation_context(protocol)["ev_petrol_like"])
 
 	def test_evaluation_conditions_follow_vehicle(self):
 		petrol = build_evaluation_context(self.make_protocol())
@@ -1626,12 +1941,12 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 
 				self.assertEqual(values["summer_tires_present"], summer_present)
 				self.assertEqual(values["winter_tires_present"], winter_present)
-				self.assertEqual(values["tire_depth_fl_10_7_2"], "5,6 мм")
-				self.assertIn("5,6 мм ± 0,05 мм", values["full_result_a_10_7_2"])
+				self.assertEqual(values["tire_depth_fl_10_7_2"], "5,60 мм")
+				self.assertIn("5,60 мм ± 0,05 мм", values["full_result_a_10_7_2"])
 				self.assertNotIn("мм мм", values["full_result_a_10_7_2"])
 				self.assertNotIn("мм мм", values["full_result_a_10_7_3"])
 				if season == "winter":
-					self.assertIn("Переднее левое: 5,6 мм ± 0,05 мм", values["full_result_a_10_7_3"])
+					self.assertIn("Переднее левое: 5,60 мм ± 0,05 мм", values["full_result_a_10_7_3"])
 
 				if season == "summer":
 					self.assertEqual(
@@ -1639,8 +1954,8 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 						"не применяется (на ТС установлены летние шины)",
 					)
 				else:
-					self.assertEqual(values["tire_depth_fl_10_7_3"], "5,6 мм")
-					self.assertIn("5,6 мм ± 0,05 мм", values["full_result_a_10_7_3"])
+					self.assertEqual(values["tire_depth_fl_10_7_3"], "5,60 мм")
+					self.assertIn("5,60 мм ± 0,05 мм", values["full_result_a_10_7_3"])
 
 	def test_front_fog_clause_8_10_1_splits_status_and_conclusion(self):
 		absent = build_front_fog_values(SimpleNamespace(front_fog_count=0))
@@ -1815,6 +2130,46 @@ class ProtocolApplicabilityTests(SimpleTestCase):
 			values["result_a_10_5_status"],
 			"не применяется (на ТС установлены летние шины)",
 		)
+
+	def test_a5_1_5_not_applicable_for_electric_parking_brake(self):
+		electric = build_parking_control_force_values(
+			SimpleNamespace(parking_brake_type="electric", parking_brake_control_force_n=None)
+		)
+		self.assertEqual(
+			electric["a_5_1_5_status"],
+			"не применяется (ТС оборудовано электронным (кнопочным) органом управления "
+			"стояночной тормозной системы)",
+		)
+		self.assertEqual(electric["a_5_1_5_conclusion"], "-")
+
+		hand = build_parking_control_force_values(
+			SimpleNamespace(parking_brake_type="mechanical_hand", parking_brake_control_force_n=Decimal("68"))
+		)
+		self.assertEqual(hand["a_5_1_5_status"], "68,00 Н")
+		self.assertTrue(hand["a_5_1_5_conclusion"].startswith("Соответствует требованиям\nТР ТС 018/2011"))
+		self.assertTrue(hand["a_5_1_5_conclusion"].endswith("68,00 Н ± 3,27 Н"))
+
+	def test_roof_fields_drive_a18_4_2_and_a18_4_4_only(self):
+		not_applicable = {
+			"applicable_18_4_2": "не применяется (на ТС отсутствуют выступающие элементы крыши из жесткого материала)",
+			"applicable_18_4_4": "не применяется (на ТС отсутствуют выступающие планки и ребра крыши из жесткого материала)",
+		}
+		cases = (
+			(True, False, "соответствует", not_applicable["applicable_18_4_4"]),
+			(False, True, not_applicable["applicable_18_4_2"], "соответствует"),
+			(None, None, not_applicable["applicable_18_4_2"], not_applicable["applicable_18_4_4"]),
+		)
+		for elements, rails, expected_2, expected_4 in cases:
+			with self.subTest(elements=elements, rails=rails):
+				measurement = SimpleNamespace(
+					roof_protruding_elements_present=elements,
+					roof_rails_ribs_present=rails,
+					# Открывающаяся крыша влияет только на А.18.5.
+					opening_roof_present=True,
+				)
+				values = build_applicability_values(SimpleNamespace(), measurement, SimpleNamespace(), {})
+				self.assertEqual(values["applicable_18_4_2"], expected_2)
+				self.assertEqual(values["applicable_18_4_4"], expected_4)
 
 	def test_a87_and_a8203_depend_only_on_adaptive_front_lighting(self):
 		protocol = SimpleNamespace()
@@ -2463,6 +2818,22 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 		self.assertFalse(above_limit.is_valid())
 		self.assertIn("14", str(above_limit.errors["axle_1_brake_difference_pct"][0]))
 
+	def test_light_absorption_result_uses_measured_uncertainty_in_hundredths(self):
+		# А.21.8: среднее и U до сотых; U — по разбросу замеров (тип А) и прибору (тип B).
+		readings = {
+			f"light_absorption_{index}": Decimal(value)
+			for index, value in enumerate(("0.10", "0.20", "0.15", "0.17", "0.18", "0.12"), start=1)
+		}
+		values = build_eco_values(
+			SimpleNamespace(),
+			SimpleNamespace(fuel_type="diesel", mileage_km=Decimal("50000"), **readings),
+		)
+
+		self.assertEqual(values["light_absorption_avg_21_8_with_unit"], "0,15 м-1")
+		self.assertEqual(values["u_light_absorption_avg_21_8"], "0,05")
+		self.assertEqual(values["light_absorption_result_21_8"], "0,15 м-1 ± 0,05 м-1")
+		self.assertIn("0,15 м-1 ± 0,05 м-1", values["full_result_a_21_8"])
+
 	def test_speedometer_range_and_actual_speed_calculation(self):
 		serializer = ProtocolMeasurementSerializer(
 			data={"actual_speed_kmh": "999", "speed_by_speedometer_kmh": "20"},
@@ -2474,6 +2845,8 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 		accepted = ProtocolMeasurementSerializer(data={"speed_by_speedometer_kmh": "25.00"}, partial=True)
 		self.assertTrue(accepted.is_valid(), accepted.errors)
+		# Фактическая скорость хранится с сотыми: 25 × 0,95 = 23,75.
+		self.assertEqual(accepted.validated_data["actual_speed_kmh"], Decimal("23.75"))
 
 		# По таблице диапазонов скорость по спидометру — только 20 или 25.
 		for invalid_speed in ("19.99", "21", "25.01", "30"):
@@ -2593,6 +2966,35 @@ class ProtocolNumericRangeTests(SimpleTestCase):
 
 
 class ProtocolCalculationTests(TestCase):
+	def test_tape_error_counts_full_and_partial_meters(self):
+		# ГОСТ 7502-98, класс 2: интервал по значению, от 1 м — Δ = 0,30 + 0,15·(L − 1),
+		# L — число полных и неполных метров.
+		cases = (
+			("5", "0.15"),
+			("9.5", "0.15"),
+			("10", "0.20"),
+			("99.5", "0.20"),
+			("100", "0.30"),
+			("999", "0.30"),
+			("1000", "0.30"),
+			("1001", "0.45"),
+			("1140", "0.45"),
+			("2000", "0.45"),
+			("3460", "0.75"),
+			("4640", "0.90"),
+		)
+		for value, expected in cases:
+			with self.subTest(value=value):
+				self.assertEqual(rgk_r5_abs_error_mm(Decimal(value)), Decimal(expected))
+
+	def test_bumper_gap_uses_014_for_millimeter_interval(self):
+		# 1–9 мм — миллиметровый интервал ±0,14 мм, 10–20 мм — сантиметровый ±0,2 мм.
+		self.assertEqual(round(u_bumper_distance_mm(Decimal("5")), 4), Decimal("0.1334"))
+		self.assertEqual(round(u_bumper_distance_mm(Decimal("15")), 4), Decimal("0.1905"))
+		self.assertIsNone(u_bumper_distance_mm(None))
+		# Доп. стоп-сигнал на 1140 мм: L = 2, Δ = 0,45 мм.
+		self.assertEqual(round(u_linear_by_value_mm(Decimal("1140")), 4), Decimal("0.4287"))
+
 	def test_calculated_vehicle_mass_is_the_sum_of_both_axles(self):
 		self.assertEqual(
 			calc_axle_load_sum_kg(

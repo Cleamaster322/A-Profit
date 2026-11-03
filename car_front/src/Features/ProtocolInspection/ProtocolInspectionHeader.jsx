@@ -14,6 +14,18 @@ import {
   headerTripleRowSx,
 } from "./protocolInspectionStyles.jsx";
 
+// Даты ставит сервер: отбора — при создании протокола, протокола — при первом «Сформировать».
+// Исправить их можно только в админке.
+function formatHeaderDate(value) {
+  const [year, month, day] = String(value || "").split("-");
+  return year && month && day ? `${day}.${month}.${year}` : "";
+}
+
+const HEADER_DATES_ROW_SX = {
+  ...headerTripleRowSx,
+  gridTemplateColumns: {xs: "1fr", md: "repeat(4, minmax(0, 1fr))"},
+};
+
 const HEADER_DOCUMENT_OPTIONS = [
   {value: "application", label: "Заявка"},
   {value: "passport_scan", label: "Скан паспорта гражданина РФ"},
@@ -111,7 +123,7 @@ function ProtocolInspectionHeader({
       </Typography>
 
       <Box sx={headerStackSx}>
-        <Box sx={headerTripleRowSx}>
+        <Box sx={HEADER_DATES_ROW_SX}>
           <TextField
             fullWidth
             label="Номер протокола"
@@ -149,16 +161,25 @@ function ProtocolInspectionHeader({
 
           <TextField
             fullWidth
-            type="date"
-            label="Дата протокола"
-            name="protocol_date"
-            value={form.protocol_date || ""}
-            onChange={handleChange}
+            label="Дата отбора"
+            value={formatHeaderDate(form.protocol_date)}
+            helperText="Ставится при создании протокола"
             sx={textFieldSx}
             slotProps={{
-              inputLabel: {
-                shrink: true,
-              },
+              input: {readOnly: true},
+              inputLabel: {shrink: true},
+            }}
+          />
+
+          <TextField
+            fullWidth
+            label="Дата протокола"
+            value={formatHeaderDate(form.first_generated_date) || "При первом «Сформировать»"}
+            helperText="Первое формирование документов"
+            sx={textFieldSx}
+            slotProps={{
+              input: {readOnly: true},
+              inputLabel: {shrink: true},
             }}
           />
         </Box>

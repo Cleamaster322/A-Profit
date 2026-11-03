@@ -1,6 +1,7 @@
 from django.urls import path
 from .views import (
     create_employee_user,
+    create_equipment_verification,
     create_protocol,
     create_protocol_brake,
     create_protocol_light,
@@ -31,6 +32,7 @@ from .views import (
     get_configuration,
     get_configuration_filter_options,
     get_csrf_token,
+    get_equipment_verifications,
     get_filtered_configurations,
     get_filtered_generations,
     get_full_protocol,
@@ -53,6 +55,7 @@ from .views import (
     manager_release_protocol_lock,
     protocol_access_required,
     protocol_heartbeat,
+    release_protocol_lock_beacon,
     post_brand,
     post_car_data,
     post_configuration,
@@ -67,6 +70,7 @@ from .views import (
     update_brand,
     update_configuration,
     update_employee_user,
+    update_equipment_verification,
     update_generation,
     update_model,
     update_protocol,
@@ -147,6 +151,8 @@ urlpatterns = [
 
     path('protocols/<int:pk>/start-editing/', protocol_access_required(start_protocol_editing)),
     path('protocols/<int:pk>/heartbeat/', protocol_access_required(protocol_heartbeat)),
+    # Не DRF: токен в теле beacon, снимается только своя блокировка (см. view).
+    path('protocols/<int:pk>/release-lock/', release_protocol_lock_beacon),
     path('protocols/<int:pk>/return-to-draft/', protocol_access_required(return_protocol_to_draft)),
     path('protocols/<int:pk>/submit-to-operator/', protocol_access_required(submit_protocol_to_operator)),
     path('protocols/<int:pk>/submit-for-review/', protocol_access_required(submit_protocol_for_review)),
@@ -224,6 +230,13 @@ urlpatterns = [
     path('users/create/', create_employee_user),
     path('users/<int:user_id>/update/', update_employee_user),
     path('users/<int:user_id>/delete/', delete_employee_user),
+
+    # =========================================================
+    # --- ПОВЕРКИ ОБОРУДОВАНИЯ (исполнительный директор и admin) ---
+    # =========================================================
+    path('equipment/', get_equipment_verifications),
+    path('equipment/<int:equipment_id>/verifications/create/', create_equipment_verification),
+    path('equipment-verifications/<int:verification_id>/update/', update_equipment_verification),
 
     # =========================================================
     # --- WORD DOCUMENTS ---

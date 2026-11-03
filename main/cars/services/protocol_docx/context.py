@@ -1,4 +1,5 @@
 from django.core.exceptions import ObjectDoesNotExist
+from django.utils import timezone
 
 from ...photo_slots import PHOTO_SLOT_TITLES, slot_photos
 from ..protocol_storage import photo_absolute_path
@@ -8,9 +9,14 @@ from .calculations import (
     build_uncertainty_values,
     calc_axle_load_sum_kg,
     calc_light_absorption_average,
+    calc_light_absorption_uncertainty,
     u_co_pct,
+    u_control_force_n,
+    u_linear_by_value_mm,
+    u_protruding_elements_mm,
 )
-from .formatters import decimal_value, fmt_bool, fmt_date, fmt_int, fmt_num, fmt_text
+from .formatters import decimal_value, fmt_bool, fmt_date, fmt_int, fmt_num, fmt_rounded, fmt_text
+from ..equipment_verification import build_equipment_verification_values, protocol_sample_date
 from .labels import (
     CYLINDER_LAYOUT_LABELS,
     ENGINE_LAYOUT_LABELS,
@@ -188,7 +194,7 @@ def get_tire_depth_value(protocol, value, active_season):
     if protocol.tire_season != active_season:
         return "-"
 
-    return value_with_unit_or_dash(True, value, 1, "мм")
+    return value_with_unit_or_dash(True, value, 2, "мм")
 
 
 def get_tire_depth_uncertainty(protocol, value, active_season):
@@ -901,7 +907,7 @@ def build_dynamic_result_values(protocol, measurement, light):
         )
         if is_fuel_diesel(fuel_type):
             average = calc_light_absorption_average(measurement)
-            status = f"{fmt_num(average, 3)} м-1" if average is not None else "соответствует"
+            status = f"{fmt_num(average, 2)} м-1" if average is not None else "соответствует"
             add_direct_result_pair(
                 values,
                 "result_a_21_8",
@@ -1167,13 +1173,13 @@ def build_front_fog_values(light):
     left_distance_u = uncertainty_with_unit_or_dash(
         front_fog_present,
         fog_light_left_distance,
-        "0,29",
+        fmt_num(u_linear_by_value_mm(fog_light_left_distance), 2),
         "мм",
     )
     right_distance_u = uncertainty_with_unit_or_dash(
         front_fog_present,
         fog_light_right_distance,
-        "0,29",
+        fmt_num(u_linear_by_value_mm(fog_light_right_distance), 2),
         "мм",
     )
 
@@ -1193,13 +1199,13 @@ def build_front_fog_values(light):
     lower_point_u = uncertainty_with_unit_or_dash(
         front_fog_present,
         fog_light_lower_point,
-        "0,29",
+        fmt_num(u_linear_by_value_mm(fog_light_lower_point), 2),
         "мм",
     )
     upper_point_u = uncertainty_with_unit_or_dash(
         front_fog_present,
         fog_light_upper_point,
-        "0,29",
+        fmt_num(u_linear_by_value_mm(fog_light_upper_point), 2),
         "мм",
     )
 
@@ -1298,14 +1304,14 @@ def build_rear_fog_values(light):
     upper_point_u = uncertainty_with_unit_or_dash(
         rear_fog_present,
         rear_fog_upper_point,
-        "0,29",
+        fmt_num(u_linear_by_value_mm(rear_fog_upper_point), 2),
         "мм",
     )
 
     lower_point_u = uncertainty_with_unit_or_dash(
         rear_fog_present,
         rear_fog_lower_point,
-        "0,29",
+        fmt_num(u_linear_by_value_mm(rear_fog_lower_point), 2),
         "мм",
     )
 
@@ -1373,10 +1379,10 @@ def build_tire_depth_values(protocol, measurement):
     is_summer = protocol.tire_season == "summer"
     is_winter = protocol.tire_season == "winter"
 
-    summer_fl = value_with_unit_or_dash(True, tire_depth_fl_mm, 1, "мм")
-    summer_fr = value_with_unit_or_dash(True, tire_depth_fr_mm, 1, "мм")
-    summer_rl = value_with_unit_or_dash(True, tire_depth_rl_mm, 1, "мм")
-    summer_rr = value_with_unit_or_dash(True, tire_depth_rr_mm, 1, "мм")
+    summer_fl = value_with_unit_or_dash(True, tire_depth_fl_mm, 2, "мм")
+    summer_fr = value_with_unit_or_dash(True, tire_depth_fr_mm, 2, "мм")
+    summer_rl = value_with_unit_or_dash(True, tire_depth_rl_mm, 2, "мм")
+    summer_rr = value_with_unit_or_dash(True, tire_depth_rr_mm, 2, "мм")
 
     summer_u_fl = uncertainty_with_unit_or_dash(True, tire_depth_fl_mm, "0,05", "мм")
     summer_u_fr = uncertainty_with_unit_or_dash(True, tire_depth_fr_mm, "0,05", "мм")
@@ -1445,6 +1451,43 @@ def build_tire_depth_values(protocol, measurement):
     }
 
 
+def protocol_test_date(protocol):
+    return getattr(protocol, "first_generated_date", None) or timezone.localdate()
+
+
+# =========================
+# Усилие на органе управления стояночной тормозной системы: А.5.1.5
+# =========================
+
+PARKING_ELECTRIC_NOT_APPLICABLE = (
+    "не применяется (ТС оборудовано электронным (кнопочным) органом управления "
+    "стояночной тормозной системы)"
+)
+
+
+def build_parking_control_force_values(brake):
+    # Электрический (кнопочный) стояночный тормоз — усилие не измеряется, пункт не применяется.
+    if getattr(brake, "parking_brake_type", None) == "electric":
+        return {"a_5_1_5_status": PARKING_ELECTRIC_NOT_APPLICABLE, "a_5_1_5_conclusion": "-"}
+
+    force = getattr(brake, "parking_brake_control_force_n", None)
+    value = value_with_unit_or_dash(True, force, 2, "Н")
+    if value == "-":
+        return {"a_5_1_5_status": "-", "a_5_1_5_conclusion": "-"}
+
+    return {
+        "a_5_1_5_status": value,
+        "a_5_1_5_conclusion": conclusion_text(
+            "Соответствует требованиям",
+            "ТР ТС 018/2011",
+            "Приложение №8 п.1.9",
+            "Требование: не более 392Н/490Н",
+            "для ТС M1",
+            f"{value} ± {fmt_num(u_control_force_n(force), 2)} Н",
+        ),
+    }
+
+
 # =========================
 # Светозащитная полоса: А.11.8
 # =========================
@@ -1455,12 +1498,12 @@ def build_sun_strip_values(measurement):
 
     if sun_strip_present:
         sun_strip_value = f"{fmt_num(sun_strip_width, 2)} мм"
-        sun_strip_uncertainty = "0,19 мм"
+        sun_strip_uncertainty = f"{fmt_num(u_linear_by_value_mm(sun_strip_width), 2)} мм"
         full_result = build_full_result_text(
             True,
             CONCLUSIONS["a_11_8_sun_strip"],
             "не более 140,00 мм",
-            f"{fmt_num(sun_strip_width, 2)} мм ± 0,19 мм",
+            f"{sun_strip_value} ± {sun_strip_uncertainty}",
         )
     else:
         sun_strip_value = "отсутствие"
@@ -1515,6 +1558,11 @@ def build_eco_values(protocol, measurement):
     co_max = getattr(measurement, "co_max_pct", None)
 
     light_absorption_average = calc_light_absorption_average(measurement)
+    light_absorption_u = (
+        fmt_num(calc_light_absorption_uncertainty(measurement), 2)
+        if light_absorption_average is not None
+        else ""
+    )
 
     if fuel_type == "electric":
         mileage_21_9 = "не применяется (ТС оборудовано только электродвигателем)"
@@ -1589,24 +1637,24 @@ def build_eco_values(protocol, measurement):
         "light_absorption_avg_21_8": value_if_applicable(
             diesel_applicable,
             light_absorption_average,
-            3,
+            2,
         ),
         "light_absorption_avg_21_8_with_unit": value_with_unit_or_dash(
             diesel_applicable,
             light_absorption_average,
-            3,
+            2,
             "м-1",
         ),
         "u_light_absorption_avg_21_8": uncertainty_if_applicable(
             diesel_applicable,
             light_absorption_average,
-            "0,048",
+            light_absorption_u,
         ),
         "light_absorption_result_21_8": result_with_uncertainty_if_applicable(
             diesel_applicable,
             light_absorption_average,
-            "0,048",
-            3,
+            light_absorption_u,
+            2,
             "м-1",
         ),
 
@@ -1617,8 +1665,8 @@ def build_eco_values(protocol, measurement):
             result_with_uncertainty_if_applicable(
                 diesel_applicable,
                 light_absorption_average,
-                "0,048",
-                3,
+                light_absorption_u,
+                2,
                 "м-1",
             ),
             diesel_not_applicable_text,
@@ -1661,7 +1709,8 @@ STATIC_CONCLUSIONS = {
     "a_22_4": static_conclusion("Приложение №8 п.9.7"),
 }
 
-# Пункты, у которых заключение «-», пока статус «не применяется» (сейчас — всегда).
+# Пункты, у которых заключение «-», пока статус «не применяется»
+# (А.18.4.2 / А.18.4.4 — по полям крыши у замерщика).
 DASH_WHEN_NOT_APPLICABLE = ("a_18_4_2", "a_18_4_4")
 
 # Пункты, у которых для электромобиля в заключении «-».
@@ -1738,6 +1787,10 @@ def build_protocol_docx_context(protocol):
         # =========================
         "protocol_number": fmt_text(protocol.protocol_number),
         "protocol_date": fmt_date(protocol.protocol_date),
+        # Дата отбора — техзапись, заявка, «Дата получения образца» в протоколе.
+        "sample_date": fmt_date(protocol_sample_date(protocol)),
+        # Дата протокола — первое «Сформировать»; в предпросмотре до него — сегодняшняя.
+        "test_date": fmt_date(protocol_test_date(protocol)),
         "protocol_page_count": "",
 
         # =========================
@@ -1863,10 +1916,10 @@ def build_protocol_docx_context(protocol):
             getattr(measurement, "transmission_type", None),
         ),
 
-        "tire_depth_fl_mm": fmt_num(getattr(measurement, "tire_depth_fl_mm", None), 1),
-        "tire_depth_fr_mm": fmt_num(getattr(measurement, "tire_depth_fr_mm", None), 1),
-        "tire_depth_rl_mm": fmt_num(getattr(measurement, "tire_depth_rl_mm", None), 1),
-        "tire_depth_rr_mm": fmt_num(getattr(measurement, "tire_depth_rr_mm", None), 1),
+        "tire_depth_fl_mm": fmt_num(getattr(measurement, "tire_depth_fl_mm", None), 2),
+        "tire_depth_fr_mm": fmt_num(getattr(measurement, "tire_depth_fr_mm", None), 2),
+        "tire_depth_rl_mm": fmt_num(getattr(measurement, "tire_depth_rl_mm", None), 2),
+        "tire_depth_rr_mm": fmt_num(getattr(measurement, "tire_depth_rr_mm", None), 2),
 
         "bumper_bends_to_body_label": fmt_bool(
             getattr(measurement, "bumper_bends_to_body", None)
@@ -1887,18 +1940,38 @@ def build_protocol_docx_context(protocol):
             getattr(measurement, "protruding_elements_other_mm", None),
             2,
         ),
+        "a_16_9_doors_protrusion_result": result_with_uncertainty_if_applicable(
+            True,
+            getattr(measurement, "protruding_elements_doors_mm", None),
+            fmt_num(u_protruding_elements_mm(), 2),
+            2,
+            "мм",
+        ),
+        "a_16_9_other_protrusion_result": result_with_uncertainty_if_applicable(
+            True,
+            getattr(measurement, "protruding_elements_other_mm", None),
+            fmt_num(u_protruding_elements_mm(), 2),
+            2,
+            "мм",
+        ),
+        "a_16_9_other_protrusion_value_with_unit": value_with_unit_or_dash(
+            True,
+            getattr(measurement, "protruding_elements_other_mm", None),
+            2,
+            "мм",
+        ),
 
         "glass_transparency_right_pct": fmt_num(
             getattr(measurement, "glass_transparency_right_pct", None),
-            1,
+            2,
         ),
         "glass_transparency_left_pct": fmt_num(
             getattr(measurement, "glass_transparency_left_pct", None),
-            1,
+            2,
         ),
         "glass_transparency_windshield_pct": fmt_num(
             getattr(measurement, "glass_transparency_windshield_pct", None),
-            1,
+            2,
         ),
         "sun_strip_width_mm": fmt_num(
             getattr(measurement, "sun_strip_width_mm", None),
@@ -1907,25 +1980,25 @@ def build_protocol_docx_context(protocol):
 
         "steering_backlash_deg": fmt_num(
             getattr(measurement, "steering_backlash_deg", None),
-            1,
+            2,
         ),
 
         "speed_by_speedometer_kmh": fmt_num(
             getattr(measurement, "speed_by_speedometer_kmh", None),
-            1,
+            2,
         ),
         "actual_speed_kmh": fmt_num(
             getattr(measurement, "actual_speed_kmh", None),
-            1,
+            2,
         ),
 
         "exhaust_noise_constant_db": fmt_num(
             getattr(measurement, "exhaust_noise_constant_db", None),
-            1,
+            2,
         ),
         "exhaust_noise_deceleration_db": fmt_num(
             getattr(measurement, "exhaust_noise_deceleration_db", None),
-            1,
+            2,
         ),
 
         "co_min_pct": fmt_num(getattr(measurement, "co_min_pct", None), 2),
@@ -1938,13 +2011,13 @@ def build_protocol_docx_context(protocol):
         "light_absorption_5": fmt_num(getattr(measurement, "light_absorption_5", None), 2),
         "light_absorption_6": fmt_num(getattr(measurement, "light_absorption_6", None), 2),
 
-        "vehicle_length_mm": fmt_num(getattr(measurement, "vehicle_length_mm", None), 1),
-        "vehicle_width_mm": fmt_num(getattr(measurement, "vehicle_width_mm", None), 1),
-        "vehicle_height_mm": fmt_num(getattr(measurement, "vehicle_height_mm", None), 1),
+        "vehicle_length_mm": fmt_num(getattr(measurement, "vehicle_length_mm", None), 2),
+        "vehicle_width_mm": fmt_num(getattr(measurement, "vehicle_width_mm", None), 2),
+        "vehicle_height_mm": fmt_num(getattr(measurement, "vehicle_height_mm", None), 2),
         "vehicle_weight_kg": fmt_num(getattr(measurement, "vehicle_weight_kg", None), 0),
         "calculated_axle_mass_kg": fmt_num(calc_axle_load_sum_kg(measurement), 2),
-        "axle1_load_kg": fmt_num(getattr(measurement, "axle1_load_kg", None), 0),
-        "axle2_load_kg": fmt_num(getattr(measurement, "axle2_load_kg", None), 0),
+        "axle1_load_kg": fmt_num(getattr(measurement, "axle1_load_kg", None), 2),
+        "axle2_load_kg": fmt_num(getattr(measurement, "axle2_load_kg", None), 2),
 
         "mileage_km": fmt_num(getattr(measurement, "mileage_km", None), 0),
         "spare_wheel_present_label": fmt_bool(
@@ -1982,24 +2055,27 @@ def build_protocol_docx_context(protocol):
 
         "service_brake_control_force_axle1_n": fmt_num(
             getattr(brake, "service_brake_control_force_axle1_n", None),
-            1,
+            2,
         ),
         "service_brake_control_force_axle2_n": fmt_num(
             getattr(brake, "service_brake_control_force_axle2_n", None),
-            1,
+            2,
         ),
         "parking_brake_control_force_n": fmt_num(
             getattr(brake, "parking_brake_control_force_n", None),
-            1,
+            2,
         ),
 
-        "axle_1_brake_difference_pct": fmt_num(
+        # Стенд выводит разность в целых процентах: округляем до целых, пишем «6,00».
+        "axle_1_brake_difference_pct": fmt_rounded(
             getattr(brake, "axle_1_brake_difference_pct", None),
-            1,
+            0,
+            2,
         ),
-        "axle_2_brake_difference_pct": fmt_num(
+        "axle_2_brake_difference_pct": fmt_rounded(
             getattr(brake, "axle_2_brake_difference_pct", None),
-            1,
+            0,
+            2,
         ),
 
         "service_brake_front_left_kn": fmt_num(
@@ -2106,16 +2182,16 @@ def build_protocol_docx_context(protocol):
             "Отсутствие",
         ),
 
-        "left_34v_cd": fmt_num(getattr(light, "left_34v_cd", None), 1),
-        "left_52h_cd": fmt_num(getattr(light, "left_52h_cd", None), 1),
-        "left_high_beam_cd": fmt_num(getattr(light, "left_high_beam_cd", None), 1),
-        "right_34v_cd": fmt_num(getattr(light, "right_34v_cd", None), 1),
-        "right_52h_cd": fmt_num(getattr(light, "right_52h_cd", None), 1),
-        "right_high_beam_cd": fmt_num(getattr(light, "right_high_beam_cd", None), 1),
+        "left_34v_cd": fmt_num(getattr(light, "left_34v_cd", None), 2),
+        "left_52h_cd": fmt_num(getattr(light, "left_52h_cd", None), 2),
+        "left_high_beam_cd": fmt_num(getattr(light, "left_high_beam_cd", None), 2),
+        "right_34v_cd": fmt_num(getattr(light, "right_34v_cd", None), 2),
+        "right_52h_cd": fmt_num(getattr(light, "right_52h_cd", None), 2),
+        "right_high_beam_cd": fmt_num(getattr(light, "right_high_beam_cd", None), 2),
 
         "turn_signal_frequency_per_min": fmt_num(
             getattr(light, "turn_signal_frequency_per_min", None),
-            1,
+            0,
         ),
         "turn_signal_frequency_hz": fmt_num(
             getattr(light, "turn_signal_frequency_hz", None),
@@ -2193,6 +2269,9 @@ def build_protocol_docx_context(protocol):
     context.update(build_front_fog_values(light))
     context.update(build_rear_fog_values(light))
     context.update(build_sun_strip_values(measurement))
+    context.update(build_parking_control_force_values(brake))
+    # Поверки СИ / аттестации ИО на дату отбора (без действующей — ближайшая, см. генератор).
+    context.update(build_equipment_verification_values(protocol)[0])
     dynamic_result_values = build_dynamic_result_values(protocol, measurement, light)
     context.update(dynamic_result_values)
     context.update(build_light_device_row_values(light))

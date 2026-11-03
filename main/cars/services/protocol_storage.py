@@ -13,13 +13,13 @@ import re
 import shutil
 import tempfile
 from contextlib import contextmanager
-from datetime import datetime
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
 from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.core.files.storage import FileSystemStorage
+from django.utils import timezone
 
 IN_PROGRESS = 'in_progress'
 COMPLETED = 'completed'
@@ -131,11 +131,11 @@ def protocol_number_label(protocol):
 
 
 def _created_date(protocol):
-    # Дата по часам сервера (TIME_ZONE в настройках — UTC, а лаборатория во Владивостоке).
+    # Местная дата (TIME_ZONE = Asia/Vladivostok).
     created = getattr(protocol, 'created_at', None)
     if created is None:
-        return datetime.now().date()
-    return created.astimezone().date() if created.tzinfo else created.date()
+        return timezone.localdate()
+    return timezone.localtime(created).date() if created.tzinfo else created.date()
 
 
 def desired_protocol_folder_name(protocol):

@@ -232,6 +232,17 @@ function AppHeader({beforeNavigate}) {
                         </Button>
                     )}
 
+                    {/* Поверки оборудования — те же права: исполнительный директор и admin. */}
+                    {canManageEmployees && (
+                        <Button
+                            onClick={() => handleNavigate("/equipment-verifications")}
+                            disabled={leaving}
+                            sx={navButtonSx(isActive("/equipment-verifications"))}
+                        >
+                            Поверки оборудования
+                        </Button>
+                    )}
+
                     {isAdminUser && (
                         <Button onClick={openAdminPanel} sx={navButtonSx(false)}>
                             Админ-панель
@@ -324,6 +335,14 @@ function AppHeader({beforeNavigate}) {
                 {canManageEmployees && (
                     <MenuItem onClick={() => handleMobileNavigate("/employees")} selected={isActive("/employees")}>
                         Сотрудники
+                    </MenuItem>
+                )}
+                {canManageEmployees && (
+                    <MenuItem
+                        onClick={() => handleMobileNavigate("/equipment-verifications")}
+                        selected={isActive("/equipment-verifications")}
+                    >
+                        Поверки оборудования
                     </MenuItem>
                 )}
                 {isAdminUser && (

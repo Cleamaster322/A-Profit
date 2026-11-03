@@ -1,6 +1,7 @@
 import {useCallback, useEffect, useRef, useState} from "react";
 import {useLocation, useNavigate, useParams} from "react-router-dom";
 import api from "../shared/api.jsx";
+import {baseURL} from "../shared/config.jsx";
 import {getApiErrorMessage} from "../shared/errorHandler.jsx";
 import {validateProtocolNumericRanges} from "../Features/ProtocolInspection/numericRangeValidation.js";
 import {
@@ -118,6 +119,7 @@ const initialForm = {
     protocol_number: "",
     appendix_number: "",
     protocol_date: "",
+    first_generated_date: "",
     status: "",
     model_id: "",
     generation_id: "",
@@ -257,6 +259,8 @@ const initialForm = {
     bumper_ends_bent_to_body: "",
     bumper_to_body_distance_mm: "",
     opening_roof_present: "",
+    roof_protruding_elements_present: "",
+    roof_rails_ribs_present: "",
     fuel_leak_prevention_measure: "",
     protruding_elements_doors_mm: "",
     protruding_elements_other_mm: "",
@@ -711,6 +715,8 @@ const MEASUREMENT_MISC_FIELDS = [
     "bumper_bends_to_body",
     "bumper_to_body_distance_mm",
     "opening_roof_present",
+    "roof_protruding_elements_present",
+    "roof_rails_ribs_present",
     "pneumatic_suspension_present",
     "fuel_tank_leak_protection_measure",
     "protruding_elements_doors_mm",
@@ -932,6 +938,7 @@ function mapProtocolToForm(data) {
         protocol_number: toFormValue(protocol.protocol_number, protocolDashFields, "protocol_number"),
         appendix_number: toFormValue(protocol.appendix_number, protocolDashFields, "appendix_number"),
         protocol_date: protocol.protocol_date || "",
+        first_generated_date: protocol.first_generated_date || "",
         status: protocol.status || "",
         model_id: protocol.model || "",
         generation_id: protocol.generation || "",
@@ -1089,6 +1096,8 @@ function mapProtocolToForm(data) {
         bumper_ends_bent_to_body: booleanToSelect(measurement.bumper_bends_to_body),
         bumper_to_body_distance_mm: toFormValue(measurement.bumper_to_body_distance_mm, measurementDashFields, "bumper_to_body_distance_mm"),
         opening_roof_present: booleanToSelect(measurement.opening_roof_present),
+        roof_protruding_elements_present: booleanToSelect(measurement.roof_protruding_elements_present),
+        roof_rails_ribs_present: booleanToSelect(measurement.roof_rails_ribs_present),
         fuel_leak_prevention_measure: toFormValue(measurement.fuel_tank_leak_protection_measure, measurementDashFields, "fuel_tank_leak_protection_measure"),
         protruding_elements_doors_mm: toFormValue(measurement.protruding_elements_doors_mm, measurementDashFields, "protruding_elements_doors_mm"),
         protruding_elements_other_mm: toFormValue(measurement.protruding_elements_other_mm, measurementDashFields, "protruding_elements_other_mm"),
@@ -1123,7 +1132,6 @@ function buildProtocolPayload(form) {
     const payload = {
         protocol_number: formatProtocolNumber(form.protocol_number),
         appendix_number: emptyToNull(form.appendix_number),
-        protocol_date: emptyToNull(form.protocol_date),
         owner_name: emptyToNull(form.owner_full_name) || "",
         owner_last_name: null,
         owner_first_name: null,
@@ -1218,6 +1226,8 @@ function buildMeasurementPayload(form, dromMassKg = form.vehicle_weight_kg) {
         bumper_bends_to_body: stringToBooleanOrNull(form.bumper_ends_bent_to_body),
         bumper_to_body_distance_mm: emptyToNull(form.bumper_to_body_distance_mm),
         opening_roof_present: stringToBooleanOrNull(form.opening_roof_present),
+        roof_protruding_elements_present: stringToBooleanOrNull(form.roof_protruding_elements_present),
+        roof_rails_ribs_present: stringToBooleanOrNull(form.roof_rails_ribs_present),
         fuel_tank_leak_protection_measure: emptyToNull(form.fuel_leak_prevention_measure),
 
         protruding_elements_doors_mm: emptyToNull(form.protruding_elements_doors_mm),
@@ -1271,7 +1281,9 @@ function buildBrakePayload(form) {
 
         service_brake_control_force_axle1_n: emptyToNull(form.service_brake_control_force_axle1_n),
         service_brake_control_force_axle2_n: emptyToNull(form.service_brake_control_force_axle2_n),
-        parking_brake_control_force_n: emptyToNull(form.parking_brake_control_force_n),
+        parking_brake_control_force_n: form.parking_brake_type === "electric"
+            ? null
+            : emptyToNull(form.parking_brake_control_force_n),
 
         axle_1_brake_difference_pct: brakeMetrics.axle1DifferencePct === null ? null : brakeMetrics.axle1DifferencePct.toFixed(2),
         axle_2_brake_difference_pct: brakeMetrics.axle2DifferencePct === null ? null : brakeMetrics.axle2DifferencePct.toFixed(2),
@@ -1770,38 +1782,111 @@ function ProtocolInspection({measurementMode = false}) {
         };
     }, [currentProtocolId, releaseProtocolLock]);
 
+    // Heartbeat продлевает блокировку, а если она пропала и протокол свободен — возвращает ее.
+    // force — после возврата страницы из кэша браузера, когда блокировку сняли при уходе.
+    const sendHeartbeat = useCallback(async ({force = false} = {}) => {
+        if (!currentProtocolId) {
+            return;
+        }
+
+        if (!force && !protocolLockActiveRef.current) {
+            return;
+        }
+
+        if (["approved", "cancelled"].includes(formStatusRef.current)) {
+            return;
+        }
+
+        try {
+            await api.post(`/cars/protocols/${currentProtocolId}/heartbeat/`);
+            protocolLockActiveRef.current = true;
+        } catch (error) {
+            if (error.response?.status === 403) {
+                protocolLockActiveRef.current = false;
+                setErrorMessage(
+                    "Редактирование остановлено: протокол занят другим пользователем."
+                );
+                return;
+            }
+
+            console.error("Ошибка heartbeat протокола:", error);
+        }
+    }, [currentProtocolId]);
+
     useEffect(() => {
         if (!currentProtocolId) {
             return;
         }
 
-        const heartbeatIntervalId = setInterval(() => {
+        const heartbeatIntervalId = setInterval(sendHeartbeat, 30000);
+
+        // Снять блокировку beacon-ом: обычный запрос при закрытии страницы не успевает уйти.
+        const releaseLockWithBeacon = () => {
             if (!protocolLockActiveRef.current) {
-                return;
+                return false;
             }
 
             if (["approved", "cancelled"].includes(formStatusRef.current)) {
+                return false;
+            }
+
+            const token = localStorage.getItem("accessToken");
+            const body = new Blob([JSON.stringify({token})], {type: "text/plain"});
+
+            if (token && navigator.sendBeacon?.(
+                `${baseURL}/cars/protocols/${currentProtocolId}/release-lock/`,
+                body,
+            )) {
+                protocolLockActiveRef.current = false;
+                return true;
+            }
+
+            return false;
+        };
+
+        // Телефон убивает свернутый браузер без события закрытия, поэтому на сенсорных
+        // устройствах блокировку снимаем уже при сворачивании (камера, другое приложение),
+        // а при возврате heartbeat занимает протокол снова, если его никто не взял.
+        // На компьютере переход на другую вкладку блокировку не снимает.
+        const isTouchDevice = window.matchMedia?.("(pointer: coarse)").matches;
+        let releasedWhileHidden = false;
+
+        const handleVisibilityChange = () => {
+            if (document.visibilityState === "hidden") {
+                if (isTouchDevice) {
+                    releasedWhileHidden = releaseLockWithBeacon() || releasedWhileHidden;
+                }
                 return;
             }
 
-            api.post(`/cars/protocols/${currentProtocolId}/heartbeat/`)
-                .catch((error) => {
-                    if (error.response?.status === 403) {
-                        protocolLockActiveRef.current = false;
-                        setErrorMessage(
-                            "Редактирование остановлено: протокол занят другим пользователем."
-                        );
-                        return;
-                    }
+            // В фоне таймеры браузер замедляет — при возврате сразу продлеваем (или возвращаем).
+            sendHeartbeat({force: releasedWhileHidden});
+            releasedWhileHidden = false;
+        };
 
-                    console.error("Ошибка heartbeat протокола:", error);
-                });
-        }, 30000);
+        // Закрытие вкладки крестиком, перезагрузка, уход со страницы.
+        const handlePageHide = () => {
+            releaseLockWithBeacon();
+        };
+
+        // Страница вернулась из кэша браузера (кнопка «Назад») — занимаем протокол снова.
+        const handlePageShow = (event) => {
+            if (event.persisted) {
+                sendHeartbeat({force: true});
+            }
+        };
+
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        window.addEventListener("pagehide", handlePageHide);
+        window.addEventListener("pageshow", handlePageShow);
 
         return () => {
             clearInterval(heartbeatIntervalId);
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
+            window.removeEventListener("pagehide", handlePageHide);
+            window.removeEventListener("pageshow", handlePageShow);
         };
-    }, [currentProtocolId]);
+    }, [currentProtocolId, sendHeartbeat]);
 
     const handleSave = async (options = {}) => {
         const {showSuccessMessage = true} = options;
@@ -2116,6 +2201,11 @@ function ProtocolInspection({measurementMode = false}) {
             // Документы сохраняются только в папку протокола на сервере, в браузер не скачиваются.
             const response = await api.generateProtocolDocuments(currentProtocolId);
 
+            // Первое «Сформировать» фиксирует дату протокола — показываем ее в шапке.
+            setForm((previous) => ({
+                ...previous,
+                first_generated_date: response.data.first_generated_date || previous.first_generated_date,
+            }));
             setSuccessMessage(describeGeneratedDocuments(response.data));
         } catch (error) {
             console.error("Ошибка формирования документов:", error);

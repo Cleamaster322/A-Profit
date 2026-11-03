@@ -210,7 +210,11 @@ class Protocol(DashFieldsMixin, models.Model):
 
     id = models.BigAutoField(primary_key=True)
     protocol_number = models.CharField(max_length=100, unique=True, null=True, blank=True)
-    protocol_date = models.DateField(null=True, blank=True)
+    # Дата отбора: ставится при создании протокола замерщиком (на сайте не меняется, только в админке).
+    # По ней выбираются поверки оборудования; в документах — {{ sample_date }}.
+    protocol_date = models.DateField('Дата отбора', null=True, blank=True)
+    # Дата протокола: первое нажатие «Сформировать», дальше не меняется. В документах — {{ test_date }}.
+    first_generated_date = models.DateField('Дата протокола (первое формирование)', null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='measurement')
     # В какой корневой папке сейчас лежат файлы протокола (см. ProtocolStorageSettings).
     files_location = models.CharField(
@@ -462,6 +466,9 @@ class ProtocolMeasurement(DashFieldsMixin, models.Model):
     bumper_to_body_distance_mm = models.DecimalField(max_digits=10, decimal_places=2, blank=True, null=True)
 
     opening_roof_present = models.BooleanField(blank=True, null=True)
+    # А.18.4.2 / А.18.4.4: выступающие элементы, планки и ребра крыши из жесткого материала.
+    roof_protruding_elements_present = models.BooleanField(blank=True, null=True)
+    roof_rails_ribs_present = models.BooleanField(blank=True, null=True)
 
     fuel_tank_leak_protection_measure = models.CharField(
         max_length=50,
@@ -869,3 +876,64 @@ class ProtocolFormSettings(models.Model):
     def load(cls):
         return cls.objects.order_by('id').first() or cls()
 
+
+# =========================
+# Оборудование и поверки
+# =========================
+
+class Equipment(models.Model):
+    """Средства измерения (СИ) и испытательное оборудование (ИО) из таблиц протокола и техзаписи."""
+    KIND_CHOICES = [
+        ('si', 'Средство измерения'),
+        ('io', 'Испытательное оборудование'),
+    ]
+
+    code = models.CharField('Инв. №', max_length=10, unique=True)  # «СИ035», «ИО007»
+    name = models.CharField('Наименование', max_length=255)
+    kind = models.CharField('Тип', max_length=2, choices=KIND_CHOICES)
+    sort_order = models.PositiveIntegerField('Порядок в таблице', default=0)
+
+    class Meta:
+        db_table = 'equipment'
+        ordering = ['sort_order']
+        verbose_name = 'Оборудование'
+        verbose_name_plural = 'Оборудование'
+
+    def __str__(self):
+        return f'{self.code} {self.name}'
+
+    @property
+    def placeholder(self):
+        # «СИ035» -> {{ eq_si035_verification }}
+        return f'eq_{self.kind}{self.code[2:]}_verification'
+
+
+class EquipmentVerification(models.Model):
+    """Поверка СИ / аттестация ИО. Записи не удаляются: по истории собираются старые протоколы."""
+    equipment = models.ForeignKey(Equipment, on_delete=models.PROTECT, related_name='verifications')
+    number = models.CharField('Номер', max_length=100)
+    start_date = models.DateField('Дата начала')
+    months = models.PositiveSmallIntegerField('Срок, мес.')
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'equipment_verification'
+        ordering = ['equipment__sort_order', 'start_date', 'id']
+        verbose_name = 'Поверка оборудования'
+        verbose_name_plural = 'Поверки оборудования'
+
+    def __str__(self):
+        return f'{self.equipment.code} {self.number} от {self.start_date:%d.%m.%Y}'
+
+    @property
+    def end_date(self):
+        from .services.equipment_verification import verification_end_date
+        return verification_end_date(self.start_date, self.months)

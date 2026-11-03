@@ -1,6 +1,6 @@
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 
-from .formatters import decimal_value, fmt_num, safe_div
+from .formatters import decimal_value, fmt_num, fmt_rounded, safe_div
 
 K_95 = Decimal("1.65")
 SQRT_3 = Decimal("3").sqrt()
@@ -325,9 +325,10 @@ def build_calculated_values(protocol):
     light_absorption_average = calc_light_absorption_average(measurement)
 
     return {
-        "calc_service_brake_specific_force": fmt_num(service_specific, 2),
-        "calc_parking_brake_specific_force": fmt_num(parking_specific, 2),
-        "calc_total_high_beam_cd": fmt_num(total_high_beam, 1),
+        # Удельная тормозная сила: до сотых, запись до тысячных (1,156 -> 1,160).
+        "calc_service_brake_specific_force": fmt_rounded(service_specific, 2, 3),
+        "calc_parking_brake_specific_force": fmt_rounded(parking_specific, 2, 3),
+        "calc_total_high_beam_cd": fmt_num(total_high_beam, 2),
         "calc_light_absorption_average": fmt_num(light_absorption_average, 2),
     }
 
@@ -371,55 +372,27 @@ def u_steering_backlash_deg():
     return expanded_from_standard(standard_u)
 
 
-def linear_abs_error_by_value_mm(value):
+# Миллиметровый интервал рулетки у зазора бампер–кузов: ±0,14 мм (по методике лаборатории).
+BUMPER_MM_INTERVAL_ERROR_MM = Decimal("0.14")
+
+
+def rgk_r5_abs_error_mm(value, mm_interval_error=Decimal("0.15")):
     """
-    Автоматический выбор абсолютной погрешности линейного измерения
-    по диапазону измеренного значения.
+    Абсолютная погрешность рулетки RGK R-5 (ГОСТ 7502-98, класс точности 2).
 
-    Используется для геометрических размеров световых приборов.
+    Интервал шкалы выбирается по измеренному значению:
+    менее 10 мм    -> миллиметровый, Δ = 0.15 мм (у бампера 0.14 мм)
+    10–99 мм       -> сантиметровый, Δ = 0.20 мм
+    100–1000 мм    -> дециметровый,  Δ = 0.30 мм
+    более 1000 мм  -> Δ = 0.30 + 0.15 * (L - 1),
+                      L — число полных и неполных метров (округление вверх).
 
-    Диапазоны:
-    0–9 мм        -> Δ = 0.15 мм
-    10–99 мм      -> Δ = 0.20 мм
-    100–5000 мм   -> Δ = 0.30 мм
-
-    Даже если в исходной таблице верхний диапазон указан до 2 м,
-    в проекте принимаем диапазон до 5000 мм.
-    """
-    value = decimal_value(value)
-
-    if value is None:
-        return None
-
-    value = abs(value)
-
-    if value <= Decimal("9"):
-        return Decimal("0.15")
-
-    if value <= Decimal("99"):
-        return Decimal("0.20")
-
-    return Decimal("0.30")
-
-def rgk_r5_vehicle_abs_error_mm(value):
-    """
-    Абсолютная погрешность рулетки RGK R-5 для габаритных размеров ТС.
-
-    Логика по Excel:
-    - значение до 1 м:
-        0–9 мм      -> Δ = 0.15 мм
-        10–99 мм    -> Δ = 0.20 мм
-        100–999 мм  -> Δ = 0.30 мм
-
-    - значение от 1 м и выше:
-        Δ = 0.3 + 0.15 * (N - 1)
-
-      где N — нижняя граница метрового интервала.
-
-      Примеры:
-      1435 мм -> интервал 1–2 м -> N = 1 -> Δ = 0.30 мм
-      1780 мм -> интервал 1–2 м -> N = 1 -> Δ = 0.30 мм
-      4640 мм -> интервал 4–5 м -> N = 4 -> Δ = 0.75 мм
+    Примеры:
+    1140 мм -> 1 полный + 1 неполный -> L = 2 -> Δ = 0.45 мм
+    1780 мм -> L = 2 -> Δ = 0.45 мм
+    2000 мм -> 2 полных -> L = 2 -> Δ = 0.45 мм
+    3460 мм -> L = 4 -> Δ = 0.75 мм
+    4640 мм -> L = 5 -> Δ = 0.90 мм
     """
     value = decimal_value(value)
 
@@ -428,57 +401,34 @@ def rgk_r5_vehicle_abs_error_mm(value):
 
     value = abs(value)
 
-    if value <= Decimal("9"):
-        return Decimal("0.15")
+    if value < Decimal("10"):
+        return mm_interval_error
 
-    if value <= Decimal("99"):
+    if value < Decimal("100"):
         return Decimal("0.20")
 
-    if value < Decimal("1000"):
+    if value <= Decimal("1000"):
         return Decimal("0.30")
 
-    meters_floor = int(value // Decimal("1000"))
+    meters = (value / Decimal("1000")).to_integral_value(rounding=ROUND_CEILING)
 
-    if meters_floor < 1:
-        meters_floor = 1
-
-    return Decimal("0.3") + Decimal("0.15") * (Decimal(meters_floor) - Decimal("1"))
+    return Decimal("0.3") + Decimal("0.15") * (meters - Decimal("1"))
 
 
-def u_rgk_r5_vehicle_mm(value):
+def u_linear_by_value_mm(value, mm_interval_error=Decimal("0.15")):
     """
-    Расширенная неопределенность габаритного размера ТС.
-
-    U = 1.65 * Δ / sqrt(3)
-    """
-    abs_error = rgk_r5_vehicle_abs_error_mm(value)
-
-    if abs_error is None:
-        return None
-
-    return expanded_uncertainty_from_abs_error(abs_error)
-
-def u_linear_by_value_mm(value):
-    """
-    Расширенная неопределенность линейного измерения
-    с автоматическим выбором базы Δ.
+    Расширенная неопределенность замера рулеткой RGK R-5,
+    Δ выбирается по значению (rgk_r5_abs_error_mm).
 
     U = 1.65 * Δ / sqrt(3)
 
     Примеры:
-    value = 0 мм:
-        Δ = 0.15 мм
-        U = 1.65 * 0.15 / sqrt(3) = 0.1429... ≈ 0.14 мм
-
-    value = 50 мм:
-        Δ = 0.20 мм
-        U = 1.65 * 0.20 / sqrt(3) = 0.1905... ≈ 0.19 мм
-
-    value = 150 мм:
-        Δ = 0.30 мм
-        U = 1.65 * 0.30 / sqrt(3) = 0.2857... ≈ 0.29 мм
+    value = 5 мм:    Δ = 0.15 мм, U ≈ 0.14 мм
+    value = 50 мм:   Δ = 0.20 мм, U ≈ 0.19 мм
+    value = 150 мм:  Δ = 0.30 мм, U ≈ 0.29 мм
+    value = 1140 мм: Δ = 0.45 мм, U ≈ 0.43 мм
     """
-    abs_error = linear_abs_error_by_value_mm(value)
+    abs_error = rgk_r5_abs_error_mm(value, mm_interval_error)
 
     if abs_error is None:
         return None
@@ -498,30 +448,14 @@ def u_linear_03_mm():
     return expanded_uncertainty_from_abs_error(Decimal("0.3"))
 
 
-def u_linear_02_mm():
+def u_bumper_distance_mm(value):
     """
-    Линейные измерения:
-    Δ = ±0.2 мм
+    Расстояние между краем бампера и кузовом (рулетка RGK R-5).
 
-    Для ширины светозащитной полосы:
-    U = 1.65 * 0.2 / sqrt(3) = 0.1905 ≈ 0.19 мм
+    1–9 мм   -> миллиметровый интервал, Δ = 0.14 мм, U = 1.65 * 0.14 / sqrt(3) ≈ 0.13 мм
+    10–99 мм -> сантиметровый интервал, Δ = 0.20 мм, U ≈ 0.19 мм
     """
-    return expanded_uncertainty_from_abs_error(Decimal("0.2"))
-
-
-def u_bumper_distance_mm():
-    """
-    Расстояние между краем бампера и кузовом.
-
-    Excel:
-    C1362 = E1344 * F1359
-    E1344 = I1320 / sqrt(3)
-    I1320 = 0.14 мм
-    F1359 = 1.65
-
-    U = 1.65 * 0.14 / sqrt(3) = 0.1333... ≈ 0.13 мм
-    """
-    return expanded_uncertainty_from_abs_error(Decimal("0.14"))
+    return u_linear_by_value_mm(value, BUMPER_MM_INTERVAL_ERROR_MM)
 
 
 def u_protruding_elements_mm():
@@ -627,7 +561,7 @@ def u_vehicle_length_mm(value):
     Неопределенность габаритной длины ТС.
     Средство измерения: рулетка RGK R-5.
     """
-    return u_rgk_r5_vehicle_mm(value)
+    return u_linear_by_value_mm(value)
 
 
 def u_vehicle_width_mm(value):
@@ -635,7 +569,7 @@ def u_vehicle_width_mm(value):
     Неопределенность габаритной ширины ТС.
     Средство измерения: рулетка RGK R-5.
     """
-    return u_rgk_r5_vehicle_mm(value)
+    return u_linear_by_value_mm(value)
 
 
 def u_vehicle_height_mm(value):
@@ -1013,8 +947,8 @@ def build_uncertainty_values(protocol=None):
     co_u = u_co_pct()
     noise_u = u_noise_db()
     steering_u = u_steering_backlash_deg()
-    linear_02_u = u_linear_02_mm()
-    bumper_distance_u = u_bumper_distance_mm()
+    sun_strip_u = u_linear_by_value_mm(get_value(measurement, "sun_strip_width_mm"))
+    bumper_distance_u = u_bumper_distance_mm(get_value(measurement, "bumper_to_body_distance_mm"))
     protruding_elements_u = u_protruding_elements_mm()
     tire_depth_u = u_tire_depth_mm()
     glass_u = u_glass_transparency_pct()
@@ -1100,9 +1034,9 @@ def build_uncertainty_values(protocol=None):
         # =========================
         # Габариты в мм
         # =========================
-        "u_vehicle_length_mm": fmt_num(length_u_mm, 1),
-        "u_vehicle_width_mm": fmt_num(width_u_mm, 1),
-        "u_vehicle_height_mm": fmt_num(height_u_mm, 1),
+        "u_vehicle_length_mm": fmt_num(length_u_mm, 2),
+        "u_vehicle_width_mm": fmt_num(width_u_mm, 2),
+        "u_vehicle_height_mm": fmt_num(height_u_mm, 2),
 
         # =========================
         # Масса и оси по весам
@@ -1118,18 +1052,14 @@ def build_uncertainty_values(protocol=None):
         "u_service_brake_control_force_axle2_n": fmt_num(service_control_force_axle2_u, 2),
         "u_parking_brake_control_force_n": fmt_num(parking_control_force_u, 2),
 
-        "u_service_brake_specific_force": fmt_num(service_specific_u, 2),
-        "u_parking_brake_specific_force": fmt_num(parking_specific_u, 2),
+        "u_service_brake_specific_force": fmt_num(service_specific_u, 3),
+        "u_parking_brake_specific_force": fmt_num(parking_specific_u, 3),
 
         "u_axle_1_brake_difference_pct": fmt_num(axle_1_difference_u, 2),
         "u_axle_2_brake_difference_pct": fmt_num(axle_2_difference_u, 2),
 
         # =========================
-        # Геометрия света
-        # Автоподбор Δ:
-        # 0–9 мм -> 0.15
-        # 10–99 мм -> 0.20
-        # 100–5000 мм -> 0.30
+        # Геометрия света: Δ рулетки по значению (rgk_r5_abs_error_mm)
         # =========================
         "u_low_beam_lower_point_mm": fmt_num(
             u_linear_by_value_mm(get_value(light, "low_beam_lower_point_mm")),
@@ -1232,9 +1162,9 @@ def build_uncertainty_values(protocol=None):
         # =========================
         # Стекла
         # =========================
-        "u_glass_transparency_windshield_pct": fmt_num(glass_u, 1),
-        "u_glass_transparency_right_pct": fmt_num(glass_u, 1),
-        "u_glass_transparency_left_pct": fmt_num(glass_u, 1),
+        "u_glass_transparency_windshield_pct": fmt_num(glass_u, 2),
+        "u_glass_transparency_right_pct": fmt_num(glass_u, 2),
+        "u_glass_transparency_left_pct": fmt_num(glass_u, 2),
 
         # =========================
         # Дымность / коэффициент поглощения света
@@ -1244,7 +1174,7 @@ def build_uncertainty_values(protocol=None):
         # =========================
         # Прочее
         # =========================
-        "u_sun_strip_width_mm": fmt_num(linear_02_u, 2),
+        "u_sun_strip_width_mm": fmt_num(sun_strip_u, 2),
         "u_bumper_to_body_distance_mm": fmt_num(bumper_distance_u, 2),
         "u_protruding_elements_doors_mm": fmt_num(protruding_elements_u, 2),
         "u_protruding_elements_other_mm": fmt_num(protruding_elements_u, 2),

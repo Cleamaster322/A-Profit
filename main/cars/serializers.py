@@ -18,6 +18,7 @@ from .models import (
     Generation,
     Configuration,
     CarData,
+    EquipmentVerification,
     Protocol,
     ProtocolMeasurement,
     ProtocolBrake,
@@ -459,6 +460,9 @@ class ProtocolSerializer(DashFieldsSerializerMixin, serializers.ModelSerializer)
             'cancelled_at',
             'created_at',
             'updated_at',
+            # Дата отбора и дата протокола ставятся автоматически; исправить — только в админке.
+            'protocol_date',
+            'first_generated_date',
         ]
 
     def validate_status(self, value):
@@ -574,7 +578,7 @@ class ProtocolMeasurementSerializer(
         else:
             attrs["actual_speed_kmh"] = (
                 Decimal(str(speedometer_speed)) * Decimal("0.95")
-            ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
+            ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         return attrs
 
     class Meta:
@@ -1350,3 +1354,27 @@ class UpdateUserSerializer(serializers.Serializer):
         instance.groups.add(group)
 
         return instance
+
+
+# =========================
+# Поверки оборудования
+# =========================
+
+class EquipmentVerificationSerializer(serializers.ModelSerializer):
+    end_date = serializers.DateField(read_only=True)
+
+    class Meta:
+        model = EquipmentVerification
+        fields = ['id', 'equipment', 'number', 'start_date', 'months', 'end_date', 'created_at', 'updated_at']
+        read_only_fields = ['id', 'equipment', 'end_date', 'created_at', 'updated_at']
+
+    def validate_number(self, value):
+        value = (value or '').strip()
+        if not value:
+            raise serializers.ValidationError('Укажите номер свидетельства / протокола.')
+        return value
+
+    def validate_months(self, value):
+        if not 1 <= value <= 240:
+            raise serializers.ValidationError('Срок — от 1 до 240 месяцев.')
+        return value

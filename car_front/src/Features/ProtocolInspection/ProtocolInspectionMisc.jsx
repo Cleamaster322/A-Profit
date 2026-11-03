@@ -2,8 +2,6 @@ import Paper from "@mui/material/Paper";
 import Typography from "@mui/material/Typography";
 import Grid from "@mui/material/Grid";
 import TextField from "@mui/material/TextField";
-import Checkbox from "@mui/material/Checkbox";
-import FormControlLabel from "@mui/material/FormControlLabel";
 import {renderField, renderSelect} from "./protocolInspectionHelpers.jsx";
 import {calculateMeasuredSpeedKmh} from "./speedCalculations.js";
 import {isDieselLikeVehicle, isElectricVehicle, isPetrolLikeVehicle} from "./electricVehicleFields.js";
@@ -71,22 +69,18 @@ function ProtocolInspectionMisc({
                         {value: "false", label: "Отсутствует"},
                     ],
                 })}
-                <Grid size={{xs: 12, md: 4}}>
-                    <FormControlLabel
-                        control={(
-                            <Checkbox
-                                checked={form.pneumatic_suspension_present === "true"}
-                                onChange={(event) => handleChange({
-                                    target: {
-                                        name: "pneumatic_suspension_present",
-                                        value: event.target.checked ? "true" : "false",
-                                    },
-                                })}
-                            />
-                        )}
-                        label="Пневматическая подвеска"
-                    />
-                </Grid>
+                {renderSelect({
+                    form,
+                    handleChange,
+                    selectFieldSx,
+                    label: "Пневматическая подвеска",
+                    name: "pneumatic_suspension_present",
+                    md: 4,
+                    options: [
+                        {value: "true", label: "Да"},
+                        {value: "false", label: "Нет"},
+                    ],
+                })}
             </Grid>
 
             <Typography variant="h6" sx={subsectionTitleSx}>
@@ -151,6 +145,33 @@ function ProtocolInspectionMisc({
                     selectFieldSx,
                     label: "Открывающаяся крыша",
                     name: "opening_roof_present",
+                    md: 6,
+                    options: [
+                        {value: "true", label: "Да"},
+                        {value: "false", label: "Нет"},
+                    ],
+                })}
+
+                {/* А.18.4.2 и А.18.4.4: при «Нет» пункт «не применяется». */}
+                {renderSelect({
+                    form,
+                    handleChange,
+                    selectFieldSx,
+                    label: "Выступающие элементы крыши (п. А.18.4.2)",
+                    name: "roof_protruding_elements_present",
+                    md: 6,
+                    options: [
+                        {value: "true", label: "Да"},
+                        {value: "false", label: "Нет"},
+                    ],
+                })}
+
+                {renderSelect({
+                    form,
+                    handleChange,
+                    selectFieldSx,
+                    label: "Планки и рёбра крыши (п. А.18.4.4)",
+                    name: "roof_rails_ribs_present",
                     md: 6,
                     options: [
                         {value: "true", label: "Да"},

@@ -8,6 +8,8 @@ from .models import (
     Brand,
     CarData,
     Configuration,
+    Equipment,
+    EquipmentVerification,
     Generation,
     Model,
     Protocol,
@@ -128,6 +130,28 @@ class ProtocolStorageSettingsAdmin(admin.ModelAdmin):
     # Одна запись: добавить можно, только пока её нет; удалять нельзя.
     def has_add_permission(self, request):
         return not ProtocolStorageSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+class EquipmentVerificationInline(admin.TabularInline):
+    model = EquipmentVerification
+    fields = ('number', 'start_date', 'months', 'end_date', 'created_by', 'created_at')
+    readonly_fields = ('end_date', 'created_by', 'created_at')
+    extra = 0
+    can_delete = False
+
+
+@admin.register(Equipment)
+class EquipmentAdmin(admin.ModelAdmin):
+    # 45 позиций из таблиц протокола: новые не добавляем, удалять нельзя.
+    list_display = ('code', 'name', 'kind')
+    search_fields = ('code', 'name')
+    inlines = (EquipmentVerificationInline,)
+
+    def has_add_permission(self, request):
+        return False
 
     def has_delete_permission(self, request, obj=None):
         return False

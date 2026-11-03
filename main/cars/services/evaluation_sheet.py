@@ -5,6 +5,10 @@
 Для каждой строки считаются X (результат), uA, uB, uc и U = 1,65·uc теми же функциями,
 что и неопределенности в протоколе (protocol_docx/calculations.py), поэтому числа совпадают.
 
+Числа округляются так же, как в протоколе (ROW_DIGITS), поэтому лист и протокол
+совпадают до тысячных; формат ячеек — в шаблоне («0.00», у удельной силы «0.000»,
+у частоты проблесков в Гц «0.0», в проблесках в минуту «0»).
+
 В контекст шаблона идут ключи ev_<код>_x / _n / _ua / _ub / _uc / _u / _error,
 а также условия строк ev_*_present и т. п. (см. EVALUATION_CONDITIONS).
 Строки ГРЗ из прототипа не выводятся — в работе ГРЗ не будет.
@@ -27,8 +31,8 @@ from .protocol_docx.calculations import (
     calc_total_high_beam_cd,
     get_related_safe,
     get_value,
-    linear_abs_error_by_value_mm,
-    rgk_r5_vehicle_abs_error_mm,
+    BUMPER_MM_INTERVAL_ERROR_MM,
+    rgk_r5_abs_error_mm,
     root_sum_squares,
     standard_headlight_uncertainty_cd,
     standard_stand_load_kg,
@@ -37,7 +41,8 @@ from .protocol_docx.calculations import (
     standard_uncertainty_type_a,
     u_total_high_beam_cd,
 )
-from .protocol_docx.formatters import decimal_value, fmt_date, fmt_text
+from .protocol_docx.formatters import decimal_value, fmt_date, fmt_text, round_half_up
+from .protocol_docx.context import protocol_test_date
 
 # =========================
 # Средства измерения (текст колонки «Оборудование»)
@@ -138,21 +143,11 @@ def relative_error_row(field, section, percent, resolution=None):
     return compute
 
 
-def linear_by_value_row(field, section="light"):
-    """Геометрия световых приборов: Δ рулетки подбирается по значению (0,15 / 0,2 / 0,3 мм)."""
+def linear_by_value_row(field, section="light", mm_interval_error=Decimal("0.15")):
+    """Замер рулеткой: Δ подбирается по значению (0,15 / 0,2 / 0,3 мм, от 1 м — по метрам)."""
     def compute(sections):
         value = get_value(sections[section], field)
-        delta = linear_abs_error_by_value_mm(value)
-        ub = standard_uncertainty_from_abs_error(delta) if delta is not None else None
-        return single(value, ub, error=format_error_mm(delta))
-    return compute
-
-
-def vehicle_size_row(field):
-    """Длина / ширина: Δ = 0,3 + 0,15·(N − 1) мм, N — метровый интервал."""
-    def compute(sections):
-        value = get_value(sections["measurement"], field)
-        delta = rgk_r5_vehicle_abs_error_mm(value)
+        delta = rgk_r5_abs_error_mm(value, mm_interval_error)
         ub = standard_uncertainty_from_abs_error(delta) if delta is not None else None
         return single(value, ub, error=format_error_mm(delta))
     return compute
@@ -346,11 +341,11 @@ def _rows():
     add("turn_signal_hz", f"п.А.8.22.1 {GOST_33670}", "Частота следования проблесков указателей поворота",
         "Герц, Гц", IPF, "± 0,1 Гц", turn_hz)
     add("turn_signal_per_min", f"п.А.8.22.1 {GOST_33670}", "Частота следования проблесков указателей поворота",
-        "(проблесков в минуту)", IPF, "± 0,1 Гц", turn_signal_per_min)
+        "(проблесков в минуту)", IPF, "± 6 проблесков в минуту", turn_signal_per_min)
     add("hazard_hz", f"п.А.8.22.2 {GOST_33670}", "Частота следования проблесков аварийной сигнализации",
         "Герц, Гц", IPF, "± 0,1 Гц", turn_hz)
     add("hazard_per_min", f"п.А.8.22.2 {GOST_33670}", "Частота следования проблесков аварийной сигнализации",
-        "(проблесков в минуту)", IPF, "± 0,1 Гц", turn_signal_per_min)
+        "(проблесков в минуту)", IPF, "± 6 проблесков в минуту", turn_signal_per_min)
 
     # Протектор: А.10.7.2 всегда, А.10.7.3 — только для зимних шин.
     tires = (("fl", "передней левой"), ("fr", "передней правой"), ("rl", "задней левой"), ("rr", "задней правой"))
@@ -365,11 +360,13 @@ def _rows():
         add(f"glass_{field}", f"п.А.11.8 {GOST_33670}", f"Светопропускание {name} стекла", "Проценты, %",
             TONIK, "± 2 %", abs_error_row(f"glass_transparency_{field}_pct", "measurement", "2", resolution="0.1"))
     add("sun_strip", f"п.А.11.8 {GOST_33670}", "Ширина светозащитной полосы", "Миллиметры, мм", TAPE,
-        "± 0,2 мм", abs_error_row("sun_strip_width_mm", "measurement", "0.2"), "ev_sun_strip_present")
+        "", linear_by_value_row("sun_strip_width_mm", "measurement"), "ev_sun_strip_present")
     add("speed", f"п.А.12.3 {GOST_33670}", "Скорость транспортного средства", "Километры в час, км/ч", ISD,
-        "± 0,15 %", relative_error_row("speed_by_speedometer_kmh", "measurement", "0.15", resolution="0.1"))
+        # Фактическая скорость (спидометр × 0,95), как в протоколе.
+        "± 0,15 %", relative_error_row("actual_speed_kmh", "measurement", "0.15", resolution="0.1"))
     add("bumper_distance", f"п.А.16.7 {GOST_33670}", "Расстояние между краем бампера и кузовом",
-        "Миллиметры, мм", TAPE, "±0,14 мм", abs_error_row("bumper_to_body_distance_mm", "measurement", "0.14"))
+        "Миллиметры, мм", TAPE, "",
+        linear_by_value_row("bumper_to_body_distance_mm", "measurement", BUMPER_MM_INTERVAL_ERROR_MM))
     add("protrusion_doors", f"п.А.16.9 {GOST_33670}", "Выступание дверной ручки за наружную поверхность кузова",
         "Миллиметры, мм", RULER, "±0,1 мм", abs_error_row("protruding_elements_doors_mm", "measurement", "0.1"))
     add("protrusion_other", f"п.А.16.9 {GOST_33670}", "Выступающие элементы", "Миллиметры, мм", RULER,
@@ -405,9 +402,9 @@ def _rows():
 
     # Габариты: ГОСТ 22748 и те же значения по ГОСТ 33987.
     add("vehicle_length", "п 2.2.1, 2.2.5 ГОСТ 22748-77", "Габаритная длина транспортного средства",
-        "Миллиметр, мм", TAPE, "", vehicle_size_row("vehicle_length_mm"))
+        "Миллиметр, мм", TAPE, "", linear_by_value_row("vehicle_length_mm", "measurement"))
     add("vehicle_width", "п 2.2.1, 2.2.2.1 ГОСТ 22748-77", "Габаритная ширина транспортного средства",
-        "Миллиметр, мм", TAPE, "", vehicle_size_row("vehicle_width_mm"))
+        "Миллиметр, мм", TAPE, "", linear_by_value_row("vehicle_width_mm", "measurement"))
     add("vehicle_height", "п 2.2.1, 2.2.27 ГОСТ 22748-77", "Габаритная высота транспортного средства",
         "Миллиметр, мм", LASER, "±2,0 мм",
         abs_error_row("vehicle_height_mm", "measurement", "2", resolution="1"))
@@ -432,6 +429,9 @@ def is_positive(value):
 def evaluation_conditions(protocol, measurement, brake, light):
     fuel_type = get_value(measurement, "fuel_type")
     rear_fog_count = decimal_value(get_value(light, "rear_fog_count"))
+    # Как в протоколе: при пробеге менее 3000 км CO (А.21.7) и дымность (А.21.8) не применяются.
+    mileage = decimal_value(get_value(measurement, "mileage_km"))
+    eco_applicable = mileage is None or mileage >= 3000
     return {
         "ev_parking_control_force_applicable": get_value(brake, "parking_brake_type") != "electric",
         "ev_front_fog_present": is_positive(get_value(light, "front_fog_count")),
@@ -440,15 +440,32 @@ def evaluation_conditions(protocol, measurement, brake, light):
         "ev_winter_tires": get_value(protocol, "tire_season") == "winter",
         # Как в протоколе (build_sun_strip_values): ширина 0 — полосы нет.
         "ev_sun_strip_present": is_positive(get_value(measurement, "sun_strip_width_mm")),
-        "ev_petrol_like": fuel_type in {"petrol", "hybrid_petrol"},
-        "ev_diesel_like": fuel_type in {"diesel", "hybrid_diesel"},
+        "ev_petrol_like": eco_applicable and fuel_type in {"petrol", "hybrid_petrol"},
+        "ev_diesel_like": eco_applicable and fuel_type in {"diesel", "hybrid_diesel"},
         "ev_not_electric": fuel_type != "electric",
     }
 
 
-def number_or_dash(value):
-    """В Excel — число (float) или «-», если величины нет."""
-    return float(value) if value is not None else "-"
+# Округление как в протоколе: (X, U, uA/uB/uc). По умолчанию — до сотых.
+DEFAULT_DIGITS = (2, 2, 2)
+ROW_DIGITS = {
+    # Разность тормозных сил: стенд дает целые проценты.
+    "brake_difference_axle1": (0, 2, 2),
+    "brake_difference_axle2": (0, 2, 2),
+    # Удельная тормозная сила: X до сотых, все колонки пишутся до тысячных.
+    "service_specific_force": (2, 3, 3),
+    "parking_specific_force": (2, 3, 3),
+    # Частота проблесков: все колонки Гц до десятых, проблески в минуту — целые.
+    "turn_signal_hz": (1, 1, 1),
+    "hazard_hz": (1, 1, 1),
+    "turn_signal_per_min": (0, 0, 0),
+    "hazard_per_min": (0, 0, 0),
+}
+
+
+def number_or_dash(value, digits):
+    """В Excel — округленное число (float) или «-», если величины нет."""
+    return float(round_half_up(value, digits)) if value is not None else "-"
 
 
 def build_evaluation_context(protocol):
@@ -459,7 +476,8 @@ def build_evaluation_context(protocol):
 
     context = {
         "protocol_number": fmt_text(get_value(protocol, "protocol_number")),
-        "protocol_date": fmt_date(get_value(protocol, "protocol_date")),
+        # «к протоколу № … от {{ test_date }}» — дата протокола (первое «Сформировать»), как в протоколе.
+        "test_date": fmt_date(protocol_test_date(protocol)),
         **evaluation_conditions(protocol, measurement, brake, light),
     }
 
@@ -467,12 +485,13 @@ def build_evaluation_context(protocol):
         result = row.compute(sections)
         sections["_results"][row.key] = result
         prefix = f"ev_{row.key}"
-        context[f"{prefix}_x"] = number_or_dash(result.x)
+        x_digits, u_digits, part_digits = ROW_DIGITS.get(row.key, DEFAULT_DIGITS)
+        context[f"{prefix}_x"] = number_or_dash(result.x, x_digits)
         context[f"{prefix}_n"] = result.count if result.x is not None else "-"
-        context[f"{prefix}_ua"] = number_or_dash(result.ua)
-        context[f"{prefix}_ub"] = number_or_dash(result.ub)
-        context[f"{prefix}_uc"] = number_or_dash(result.uc)
-        context[f"{prefix}_u"] = number_or_dash(result.u)
+        context[f"{prefix}_ua"] = number_or_dash(result.ua, part_digits)
+        context[f"{prefix}_ub"] = number_or_dash(result.ub, part_digits)
+        context[f"{prefix}_uc"] = number_or_dash(result.uc, part_digits)
+        context[f"{prefix}_u"] = number_or_dash(result.u, u_digits)
         context[f"{prefix}_error"] = result.error or row.error
 
     return context

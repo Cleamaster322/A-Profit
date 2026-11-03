@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from django.conf import settings
+from django.utils import timezone
 
 from .protocol_docx import build_protocol_docx_context, render_protocol_docx
 from .protocol_docx.placeholder_aliases import add_protocol_placeholder_aliases
@@ -13,7 +14,14 @@ from .protocol_storage import (
     sync_protocol_folder,
 )
 from .protocol_word import count_word_pages
+from .equipment_verification import (
+    MissingVerificationError,
+    build_equipment_verification_values,
+    missing_verifications_message,
+    protocol_sample_date,
+)
 from .evaluation_sheet import build_evaluation_context
+from .tech_record_table import render_tech_record_table
 from .xlsx_renderer import render_xlsx
 
 TEMPLATES_DIR = Path(settings.BASE_DIR) / "cars" / "templates"
@@ -28,8 +36,18 @@ PROTOCOL_DOCUMENTS = [
     ("Техзапись", "tech_record_template.docx", False),
 ]
 
-# Лист оценки неопределенности — Excel, свой контекст (services/evaluation_sheet.py).
-EVALUATION_DOCUMENT = ("Лист оценки", "evaluation_sheet_template.xlsx")
+
+
+def render_evaluation_sheet(template_path, output_path, protocol):
+    return render_xlsx(template_path, output_path, build_evaluation_context(protocol))
+
+
+# Excel-документы со своим контекстом: лист оценки неопределенности
+# (services/evaluation_sheet.py) и бланк «Таблица для техзаписи» (services/tech_record_table.py).
+EXCEL_DOCUMENTS = [
+    ("Лист оценки", "evaluation_sheet_template.xlsx", render_evaluation_sheet),
+    ("Таблица для техзаписи", "tech_record_table_template.xlsx", render_tech_record_table),
+]
 
 
 def build_document_context(protocol):
@@ -63,16 +81,29 @@ def generate_protocol_docx(protocol, output_path=None):
     return render_document(template_path, output_path, build_document_context(protocol), count_pages)
 
 
-def generate_protocol_documents(protocol):
+def generate_protocol_documents(protocol, allow_missing_verifications=False):
     """
     Собирает все документы протокола в его папку (каждый файл перезаписывается).
 
     Документ без шаблона пропускается. Если файл открыт в Word, остальные документы
     всё равно собираются, а ошибка попадает в errors.
+
+    Без действующей поверки оборудования на дату отбора — MissingVerificationError;
+    allow_missing_verifications=True (admin) — формируем с ближайшей поверкой и предупреждаем.
+    Первое формирование фиксирует дату протокола (first_generated_date).
     """
     protocol_template = TEMPLATES_DIR / PROTOCOL_DOCUMENT[1]
     if not protocol_template.exists():
         raise FileNotFoundError(f"Не найден шаблон протокола: {protocol_template}")
+
+    _, missing = build_equipment_verification_values(protocol, allow_missing=False)
+    missing_message = missing_verifications_message(missing, protocol_sample_date(protocol)) if missing else None
+    if missing and not allow_missing_verifications:
+        raise MissingVerificationError(missing_message)
+
+    if protocol.first_generated_date is None:
+        protocol.first_generated_date = timezone.localdate()
+        protocol.save(update_fields=["first_generated_date"])
 
     # Папка называется по VIN: если переименовать раньше не удалось, пробуем ещё раз.
     folder_warning = sync_protocol_folder(protocol)
@@ -83,7 +114,7 @@ def generate_protocol_documents(protocol):
         "files": [],
         "skipped": [],
         "errors": [],
-        "warnings": [folder_warning] if folder_warning else [],
+        "warnings": [warning for warning in (folder_warning, missing_message) if warning],
     }
 
     for title, template_name, count_pages in PROTOCOL_DOCUMENTS:
@@ -106,19 +137,21 @@ def generate_protocol_documents(protocol):
 
         result["files"].append(output_path)
 
-    title, template_name = EVALUATION_DOCUMENT
-    template_path = TEMPLATES_DIR / template_name
-    if not template_path.exists():
-        result["skipped"].append(f"{title} (нет шаблона {template_name})")
-    else:
+    for title, template_name, render in EXCEL_DOCUMENTS:
+        template_path = TEMPLATES_DIR / template_name
+        if not template_path.exists():
+            result["skipped"].append(f"{title} (нет шаблона {template_name})")
+            continue
+
         output_path = protocol_document_path(protocol, title, extension="xlsx")
         try:
             with replace_file_atomically(output_path) as temp_path:
-                render_xlsx(template_path, temp_path, build_evaluation_context(protocol))
+                render(template_path, temp_path, protocol)
         except ProtocolFileBusyError as error:
             result["errors"].append(str(error))
-        else:
-            result["files"].append(output_path)
+            continue
+
+        result["files"].append(output_path)
 
     # До появления нескольких документов протокол лежал в папке как <номер>.docx.
     if result["files"]:
