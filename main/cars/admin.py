@@ -137,7 +137,7 @@ class ProtocolStorageSettingsAdmin(admin.ModelAdmin):
 
 class EquipmentVerificationInline(admin.TabularInline):
     model = EquipmentVerification
-    fields = ('number', 'start_date', 'months', 'end_date', 'created_by', 'created_at')
+    fields = ('number', 'start_date', 'months', 'end_date', 'supersedes_previous', 'created_by', 'created_at')
     readonly_fields = ('end_date', 'created_by', 'created_at')
     extra = 0
     can_delete = False

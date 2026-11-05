@@ -15,6 +15,7 @@ from .views import (
     delete_brand,
     delete_configuration,
     delete_employee_user,
+    delete_equipment_verification,
     delete_generation,
     delete_model,
     delete_protocol,
@@ -46,6 +47,7 @@ from .views import (
     get_protocol_form_settings,
     get_protocol_photo_file,
     get_protocol_photo_slots,
+    get_protocol_verification_check,
     get_protocol_photos,
     get_protocol_power_supply,
     get_protocol_road_conditions,
@@ -55,6 +57,7 @@ from .views import (
     manager_release_protocol_lock,
     protocol_access_required,
     protocol_heartbeat,
+    rename_protocol_photo,
     release_protocol_lock_beacon,
     post_brand,
     post_car_data,
@@ -71,6 +74,7 @@ from .views import (
     update_configuration,
     update_employee_user,
     update_equipment_verification,
+    use_equipment_verification_now,
     update_generation,
     update_model,
     update_protocol,
@@ -165,6 +169,10 @@ urlpatterns = [
     path('protocols/<int:protocol_id>/full/', protocol_access_required(get_full_protocol)),
     path('protocols/<int:protocol_id>/generate-docx/', protocol_access_required(generate_protocol_docx_file)),
     path('protocols/<int:protocol_id>/preview-pdf/', protocol_access_required(preview_protocol_pdf_file)),
+    path(
+        'protocols/<int:protocol_id>/verification-check/',
+        protocol_access_required(get_protocol_verification_check),
+    ),
 
     # =========================================================
     # --- MEASUREMENT ---
@@ -216,6 +224,7 @@ urlpatterns = [
     path('protocols/<int:protocol_id>/photos/', protocol_access_required(get_protocol_photos)),
     path('protocols/<int:protocol_id>/photos/create/', protocol_access_required(create_protocol_photo)),
     path('protocol-photos/<int:photo_id>/delete/', protocol_access_required(delete_protocol_photo)),
+    path('protocol-photos/<int:photo_id>/rename/', protocol_access_required(rename_protocol_photo)),
     path(
         'protocol-photos/<int:photo_id>/file/',
         protocol_access_required(get_protocol_photo_file),
@@ -237,6 +246,8 @@ urlpatterns = [
     path('equipment/', get_equipment_verifications),
     path('equipment/<int:equipment_id>/verifications/create/', create_equipment_verification),
     path('equipment-verifications/<int:verification_id>/update/', update_equipment_verification),
+    path('equipment-verifications/<int:verification_id>/use-now/', use_equipment_verification_now),
+    path('equipment-verifications/<int:verification_id>/delete/', delete_equipment_verification),
 
     # =========================================================
     # --- WORD DOCUMENTS ---

@@ -45,7 +45,15 @@ from .models import (
     ProtocolPowerSupply,
 )
 from .pagination import Pagination
-from .photo_slots import PHOTO_SLOT_ORDER, PHOTO_SLOT_TITLES, photo_slots_payload, slot_photos
+from .photo_slots import (
+    EXTRA_PHOTO_TITLE_MAX_LENGTH,
+    EXTRA_PHOTO_TYPE,
+    PHOTO_SLOT_ORDER,
+    PHOTO_SLOT_TITLES,
+    extra_photos,
+    photo_slots_payload,
+    slot_photos,
+)
 from .serializers import (
     BrandSerializer,
     EquipmentVerificationSerializer,
@@ -71,6 +79,11 @@ from .serializers import (
 )
 from .services.equipment_verification import (
     MissingVerificationError,
+    VerificationNotActiveError,
+    build_equipment_verification_values,
+    protocol_sample_date,
+    protocols_with_pinned,
+    use_verification_now,
     verification_on,
     verification_status,
 )
@@ -86,6 +99,8 @@ from .services.protocol_storage import (
     protocol_files_moved_to,
     protocol_number_label,
     remove_dirs,
+    rename_extra_photo_file,
+    save_extra_photo_file,
     save_photo_file,
     sync_protocol_folder,
 )
@@ -2438,7 +2453,7 @@ def get_protocol_photos(request, protocol_id):
             return Response(status=status.HTTP_404_NOT_FOUND)
 
         serializer = ProtocolPhotoSerializer(
-            slot_photos(protocol),
+            slot_photos(protocol) + extra_photos(protocol),
             many=True,
             context={'request': request}
         )
@@ -2468,6 +2483,24 @@ def create_protocol_photo(request, protocol_id):
             )
 
         photo_type = request.data.get('photo_type')
+
+        if photo_type == EXTRA_PHOTO_TYPE:
+            # Дополнительное фото: любое количество, название обязательно, в протокол не идет.
+            title, title_error = clean_extra_photo_title(request.data.get('title'))
+            if title_error:
+                return Response({'title': title_error}, status=status.HTTP_400_BAD_REQUEST)
+
+            photo = ProtocolPhoto.objects.create(
+                protocol=protocol,
+                photo_type=EXTRA_PHOTO_TYPE,
+                title=title,
+                file_path=save_extra_photo_file(protocol, title, uploaded_file),
+                sort_order=len(PHOTO_SLOT_ORDER),
+            )
+            return Response(
+                ProtocolPhotoSerializer(photo, context={'request': request}).data,
+                status=status.HTTP_201_CREATED,
+            )
 
         if photo_type not in PHOTO_SLOT_TITLES:
             return Response(
@@ -2501,6 +2534,45 @@ def create_protocol_photo(request, protocol_id):
         )
 
         return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    except Exception:
+        logger.exception('Unhandled exception in cars API')
+        return internal_server_error()
+
+
+def clean_extra_photo_title(value):
+    title = ' '.join(str(value or '').split())
+    if not title:
+        return '', 'Укажите название фото.'
+    if len(title) > EXTRA_PHOTO_TITLE_MAX_LENGTH:
+        return '', f'Название — не длиннее {EXTRA_PHOTO_TITLE_MAX_LENGTH} символов.'
+    return title, None
+
+
+@api_view(['PATCH'])
+@permission_classes([IsAuthenticated])
+def rename_protocol_photo(request, photo_id):
+    # Переименовать можно только дополнительное фото; файл переименовывается вместе с названием.
+    try:
+        photo = ProtocolPhoto.objects.select_related('protocol').filter(pk=photo_id).first()
+        if not photo:
+            return Response(status=status.HTTP_404_NOT_FOUND)
+
+        if photo.photo_type != EXTRA_PHOTO_TYPE:
+            return Response(
+                {'detail': 'Переименовать можно только дополнительное фото.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        title, title_error = clean_extra_photo_title(request.data.get('title'))
+        if title_error:
+            return Response({'title': title_error}, status=status.HTTP_400_BAD_REQUEST)
+
+        photo.file_path = rename_extra_photo_file(photo, photo.protocol, title)
+        photo.title = title
+        photo.save(update_fields=['title', 'file_path'])
+
+        return Response(ProtocolPhotoSerializer(photo, context={'request': request}).data)
 
     except Exception:
         logger.exception('Unhandled exception in cars API')
@@ -3156,6 +3228,73 @@ def create_equipment_verification(request, equipment_id):
     serializer.save(equipment=equipment, created_by=request.user)
     equipment = Equipment.objects.prefetch_related('verifications').get(pk=equipment.pk)
     return Response(equipment_payload(equipment, timezone.localdate()), status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_protocol_verification_check(request, protocol_id):
+    # Предупреждение на странице протокола: оборудование без действующей поверки на дату отбора.
+    protocol = Protocol.objects.filter(pk=protocol_id).first()
+    if not protocol:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    _, missing = build_equipment_verification_values(protocol, allow_missing=False)
+    return Response({
+        'sample_date': protocol_sample_date(protocol),
+        'missing': [{'code': item.code, 'name': item.name} for item in missing],
+    })
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def delete_equipment_verification(request, verification_id):
+    # Удаление ошибочной поверки — только с подтверждением словом «УДАЛИТЬ».
+    if not is_executive_director_or_superuser_request(request):
+        return Response(status=status.HTTP_403_FORBIDDEN)
+
+    verification = EquipmentVerification.objects.filter(pk=verification_id).first()
+    if not verification:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    confirm_text = str(request.data.get('confirm_text', '')).strip().lower()
+    if confirm_text != 'удалить':
+        return Response(
+            {'detail': 'Для удаления нужно ввести слово «УДАЛИТЬ».'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    used_in = protocols_with_pinned(verification)
+    if used_in:
+        return Response(
+            {'detail': f'Поверка использована в протоколах № {", ".join(used_in)} — удалить нельзя.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    equipment_id = verification.equipment_id
+    verification.delete()
+    equipment = Equipment.objects.prefetch_related('verifications').get(pk=equipment_id)
+    return Response(equipment_payload(equipment, timezone.localdate()))
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def use_equipment_verification_now(request, verification_id):
+    # Переключатель «Используется сейчас» в истории поверок.
+    if not is_executive_director_or_superuser_request(request):
+        return Response(status=status.HTTP_403_FORBIDDEN)
+
+    verification = EquipmentVerification.objects.select_related('equipment').filter(pk=verification_id).first()
+    if not verification:
+        return Response(status=status.HTTP_404_NOT_FOUND)
+
+    try:
+        with transaction.atomic():
+            use_verification_now(verification)
+    except VerificationNotActiveError as error:
+        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+
+    equipment = Equipment.objects.prefetch_related('verifications').get(pk=verification.equipment_id)
+    return Response(equipment_payload(equipment, timezone.localdate()))
 
 
 @api_view(['PATCH'])

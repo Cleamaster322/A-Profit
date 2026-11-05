@@ -43,7 +43,7 @@ const photoBoxSx = {
 
 // Фото с защищённого адреса (нужен JWT) — грузим через api и показываем blob.
 // Компонент монтируется с key={fileUrl}, поэтому при смене фото состояние начинается заново.
-function ProtocolPhotoImage({ fileUrl, alt }) {
+export function ProtocolPhotoImage({ fileUrl, alt, sx }) {
     const [src, setSrc] = useState("");
     const [failed, setFailed] = useState(false);
 
@@ -99,6 +99,7 @@ function ProtocolPhotoImage({ fileUrl, alt }) {
             sx={{
                 ...photoBoxSx,
                 objectFit: "contain",
+                ...sx,
             }}
         />
     );
@@ -133,7 +134,8 @@ function ProtocolInspectionPhotos({
     const photosByType = useMemo(() => {
         const result = {};
 
-        photos.forEach((photo) => {
+        // Дополнительные фото (extra) показываются отдельным блоком в конце страницы.
+        photos.filter((photo) => photo.photo_type !== "extra").forEach((photo) => {
             result[photo.photo_type] = photo;
         });
 

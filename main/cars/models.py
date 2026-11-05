@@ -215,6 +215,9 @@ class Protocol(DashFieldsMixin, models.Model):
     protocol_date = models.DateField('Дата отбора', null=True, blank=True)
     # Дата протокола: первое нажатие «Сформировать», дальше не меняется. В документах — {{ test_date }}.
     first_generated_date = models.DateField('Дата протокола (первое формирование)', null=True, blank=True)
+    # Поверки, закрепленные при первом «Сформировать»: {инв. № оборудования: id поверки}.
+    # Пересборка берет их, а не текущие — новые поверки на выпущенный протокол не влияют.
+    pinned_verifications = models.JSONField('Закрепленные поверки', default=dict, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='measurement')
     # В какой корневой папке сейчас лежат файлы протокола (см. ProtocolStorageSettings).
     files_location = models.CharField(
@@ -728,6 +731,8 @@ class ProtocolPhoto(models.Model):
     )
 
     photo_type = models.CharField(max_length=50, choices=PHOTO_TYPE_CHOICES)
+    # Название дополнительного фото (photo_type='extra'); у слотов название берется из photo_slots.py.
+    title = models.CharField('Название', max_length=150, blank=True, default='')
     file_path = models.CharField(max_length=500, blank=True, null=True)
     sort_order = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -909,11 +914,17 @@ class Equipment(models.Model):
 
 
 class EquipmentVerification(models.Model):
-    """Поверка СИ / аттестация ИО. Записи не удаляются: по истории собираются старые протоколы."""
+    """Поверка СИ / аттестация ИО. По истории собираются старые протоколы — удалять только ошибочные."""
     equipment = models.ForeignKey(Equipment, on_delete=models.PROTECT, related_name='verifications')
-    number = models.CharField('Номер', max_length=100)
+    # Номер свидетельства / протокола уникален во всей базе (без учета регистра и пробелов — в сериализаторе).
+    number = models.CharField('Номер', max_length=100, unique=True)
     start_date = models.DateField('Дата начала')
     months = models.PositiveSmallIntegerField('Срок, мес.')
+    # При пересечении: True — с даты начала используется эта поверка, а не старая
+    # (например, в новой поверке изменились характеристики прибора).
+    supersedes_previous = models.BooleanField('Используется при пересечении', default=False)
+    # День последнего письма о скором окончании: не чаще раза в день по поверке.
+    expiry_notified_on = models.DateField('Напоминание отправлено', null=True, blank=True)
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.SET_NULL,
@@ -937,3 +948,17 @@ class EquipmentVerification(models.Model):
     def end_date(self):
         from .services.equipment_verification import verification_end_date
         return verification_end_date(self.start_date, self.months)
+
+
+class ReminderLog(models.Model):
+    """Отметка «сегодня уже писали» для ежедневных сообщений без привязки к поверке (например, «всё в порядке»)."""
+    kind = models.CharField(max_length=50)
+    day = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'reminder_log'
+        constraints = [models.UniqueConstraint(fields=['kind', 'day'], name='reminder_log_kind_day_unique')]
+        verbose_name = 'Отправленное напоминание'
+        verbose_name_plural = 'Отправленные напоминания'
+

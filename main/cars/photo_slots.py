@@ -144,15 +144,26 @@ PHOTO_SLOTS = [
 ]
 
 PHOTO_SLOT_CODES = [code for code, _, _, _ in PHOTO_SLOTS]
-PHOTO_TYPE_CHOICES = [(code, title) for code, title, _, _ in PHOTO_SLOTS]
-PHOTO_SLOT_TITLES = dict(PHOTO_TYPE_CHOICES)
+PHOTO_SLOT_TITLES = {code: title for code, title, _, _ in PHOTO_SLOTS}
 PHOTO_SLOT_ORDER = {code: index for index, code in enumerate(PHOTO_SLOT_CODES)}
+
+# Дополнительные фото для оператора (нюансы машины): любое количество, у каждого свое название.
+# В протокол и другие документы НЕ попадают.
+EXTRA_PHOTO_TYPE = 'extra'
+EXTRA_PHOTO_TITLE_MAX_LENGTH = 150
+PHOTO_TYPE_CHOICES = [(code, title) for code, title, _, _ in PHOTO_SLOTS] + [
+    (EXTRA_PHOTO_TYPE, 'Дополнительное фото'),
+]
 
 
 def slot_photos(protocol):
     """Фото протокола из схемы в порядке слотов; старые типы («Другое» и т. п.) отбрасываются."""
     photos = protocol.photos.filter(photo_type__in=PHOTO_SLOT_CODES)
     return sorted(photos, key=lambda photo: (PHOTO_SLOT_ORDER[photo.photo_type], photo.id))
+
+
+def extra_photos(protocol):
+    return list(protocol.photos.filter(photo_type=EXTRA_PHOTO_TYPE).order_by('created_at', 'id'))
 
 
 def photo_slots_payload():

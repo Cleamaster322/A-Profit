@@ -33,6 +33,8 @@ DEFAULT_DIRS = {
 LEGACY_PHOTO_PREFIX = 'protocol_photos/'
 
 PHOTOS_DIR = 'photos'
+# Дополнительные фото (не попадают в протокол) — отдельная подпапка.
+EXTRA_PHOTOS_DIR = 'photos/Дополнительные'
 
 # Символы, недопустимые в имени папки Windows.
 INVALID_FOLDER_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -308,6 +310,43 @@ def save_photo_file(protocol, title, uploaded_file):
         storage.delete(relative_path)
 
     return storage.save(relative_path, uploaded_file)
+
+
+def free_extra_photo_path(storage, title, extension, current_path=None):
+    """«<название>.jpg», а если занято другим фото — «<название> (2).jpg», «(3)» и т. д."""
+    stem = photo_file_stem(title)
+    number = 1
+    while True:
+        name = f'{stem}{extension}' if number == 1 else f'{stem} ({number}){extension}'
+        relative_path = str(PurePosixPath(EXTRA_PHOTOS_DIR) / name)
+        if relative_path == current_path or not storage.exists(relative_path):
+            return relative_path
+        number += 1
+
+
+def save_extra_photo_file(protocol, title, uploaded_file):
+    """Дополнительное фото: файлы с тем же названием не перезаписываются."""
+    storage = _protocol_file_storage(protocol)
+    extension = Path(uploaded_file.name).suffix.lower()
+    return storage.save(free_extra_photo_path(storage, title, extension), uploaded_file)
+
+
+def rename_extra_photo_file(photo, protocol, title):
+    """Переименовывает файл дополнительного фото под новое название; возвращает новый путь."""
+    old_path = photo_absolute_path(photo, protocol)
+    if old_path is None or not old_path.is_file():
+        return photo.file_path
+
+    storage = _protocol_file_storage(protocol)
+    current = str(photo.file_path).replace('\\', '/')
+    relative_path = free_extra_photo_path(storage, title, old_path.suffix.lower(), current_path=current)
+    if relative_path == current:
+        return photo.file_path
+
+    target = Path(storage.path(relative_path))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(old_path, target)
+    return relative_path
 
 
 def is_legacy_photo_path(file_path):

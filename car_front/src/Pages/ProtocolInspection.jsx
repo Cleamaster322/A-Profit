@@ -26,6 +26,7 @@ import ProtocolInspectionHeader from "../Features/ProtocolInspection/ProtocolIns
 import {calculateBrakeMetrics, validateBrakeMetrics} from "../Features/ProtocolInspection/brakeCalculations.js";
 import ProtocolInspectionConditions from "../Features/ProtocolInspection/ProtocolInspectionConditions.jsx";
 import ProtocolInspectionPhotos from "../Features/ProtocolInspection/ProtocolInspectionPhotos.jsx";
+import ProtocolExtraPhotos from "../Features/ProtocolInspection/ProtocolExtraPhotos.jsx";
 import {withoutFuelHiddenFields} from "../Features/ProtocolInspection/electricVehicleFields.js";
 import {getProtocolPhotoSlots} from "../shared/protocolPhotoApi.jsx";
 import {
@@ -1397,6 +1398,8 @@ function ProtocolInspection({measurementMode = false}) {
     const [form, setForm] = useState(initialForm);
     const [photos, setPhotos] = useState([]);
     const [photoSlots, setPhotoSlots] = useState([]);
+    // Оборудование без действующей поверки на дату отбора: {sample_date, missing: [{code, name}]}.
+    const [verificationCheck, setVerificationCheck] = useState(null);
 
     const formStatusRef = useRef("");
     const protocolLockActiveRef = useRef(false);
@@ -2279,6 +2282,29 @@ function ProtocolInspection({measurementMode = false}) {
         };
     }, []);
 
+    // Предупреждение заранее: без действующих поверок протокол нельзя будет выпустить.
+    useEffect(() => {
+        if (!currentProtocolId) {
+            return undefined;
+        }
+
+        let cancelled = false;
+
+        api.get(`/cars/protocols/${currentProtocolId}/verification-check/`)
+            .then((response) => {
+                if (!cancelled) {
+                    setVerificationCheck(response.data);
+                }
+            })
+            .catch((error) => {
+                console.error("Ошибка проверки поверок оборудования:", error);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [currentProtocolId]);
+
     useEffect(() => {
         let cancelled = false;
 
@@ -2941,6 +2967,15 @@ function ProtocolInspection({measurementMode = false}) {
                         </Alert>
                     )}
 
+                    {verificationCheck?.missing?.length > 0 && (
+                        <Alert severity="warning" sx={{mb: 2, borderRadius: 0}}>
+                            Нет действующей поверки на дату отбора{" "}
+                            {String(verificationCheck.sample_date || "").split("-").reverse().join(".")}:{" "}
+                            {verificationCheck.missing.map((item) => `${item.code} ${item.name}`).join("; ")}.
+                            {" "}Протокол нельзя будет выпустить — сообщите исполнительному директору.
+                        </Alert>
+                    )}
+
                     {!measurementMode && ["operator", "revision"].includes(form.status) && (
                         <Box
                             sx={{
@@ -3033,6 +3068,18 @@ function ProtocolInspection({measurementMode = false}) {
                         <BlockError message={blockErrors.misc}/>
                         <ProtocolInspectionMisc {...commonSectionProps} />
                     </Box>
+
+                    {/* Доп. фото для оператора: не попадают в протокол. */}
+                    {currentProtocolId && (
+                        <ProtocolExtraPhotos
+                            protocolId={currentProtocolId}
+                            photos={photos}
+                            setPhotos={setPhotos}
+                            onRestoreLock={restoreProtocolLock}
+                            sectionPaperSx={sectionPaperSx}
+                            sectionTitleSx={sectionTitleSx}
+                        />
+                    )}
 
                     <Box
                         sx={{

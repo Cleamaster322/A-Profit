@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from io import StringIO
 import importlib
@@ -72,6 +72,12 @@ from .services.protocol_docx.calculations import (
 )
 from .services.evaluation_sheet import EVALUATION_ROWS, build_evaluation_context
 from .services.tech_record_table import render_tech_record_table
+from .services.verification_notifications import (
+	send_daily_verification_status,
+	send_expiry_notifications,
+	send_test_notification,
+	split_message,
+)
 from .services.equipment_verification import (
 	build_equipment_verification_values,
 	format_verification,
@@ -96,6 +102,7 @@ from .services.protocol_docx.context import (
 	build_dynamic_result_values,
 	build_eco_values,
 	build_parking_control_force_values,
+	build_photo_values,
 	build_front_fog_values,
 	build_rear_fog_values,
 	build_tire_depth_values,
@@ -1240,6 +1247,58 @@ class ProtocolFileStorageTests(TestCase):
 		self.client.force_authenticate(user=None)
 		self.assertEqual(self.client.get("/cars/protocol-form-settings/").status_code, 401)
 
+	def upload_extra_photo(self, title, filename="camera.JPG", content=b"jpeg-bytes"):
+		self.client.force_authenticate(user=self.measurer)
+		data = {"photo_type": "extra", "file": SimpleUploadedFile(filename, content, content_type="image/jpeg")}
+		if title is not None:
+			data["title"] = title
+		return self.client.post(f"/cars/protocols/{self.protocol.id}/photos/create/", data, format="multipart")
+
+	def test_extra_photos_need_title_and_never_overwrite_each_other(self):
+		self.assertEqual(self.upload_extra_photo(None).status_code, 400)
+		self.assertIn("title", self.upload_extra_photo("   ").data)
+
+		first = self.upload_extra_photo("Скол на стекле", content=b"first")
+		second = self.upload_extra_photo("Скол на стекле", content=b"second")
+		self.assertEqual(first.status_code, 201)
+		self.assertEqual(second.status_code, 201)
+		self.assertEqual(first.data["caption"], "Скол на стекле")
+		self.assertEqual(first.data["file_path"], "photos/Дополнительные/Скол на стекле.jpg")
+		self.assertEqual(second.data["file_path"], "photos/Дополнительные/Скол на стекле (2).jpg")
+
+		folder = self.in_progress / self.folder / "photos" / "Дополнительные"
+		self.assertEqual((folder / "Скол на стекле.jpg").read_bytes(), b"first")
+		self.assertEqual((folder / "Скол на стекле (2).jpg").read_bytes(), b"second")
+
+		# Слоты и дополнительные фото приходят вместе, но в DOCX идут только слоты.
+		self.upload_photo("odometer_photo")
+		listed = self.client.get(f"/cars/protocols/{self.protocol.id}/photos/").data
+		self.assertEqual([photo["photo_type"] for photo in listed], ["odometer_photo", "extra", "extra"])
+		docx_titles = [photo["title"] for photo in build_photo_values(self.protocol)["protocol_photos"]]
+		self.assertNotIn("Скол на стекле", docx_titles)
+
+	def test_extra_photo_rename_moves_file(self):
+		photo_id = self.upload_extra_photo("Царапина").data["id"]
+
+		response = self.client.patch(
+			f"/cars/protocol-photos/{photo_id}/rename/", {"title": "Царапина на двери слева"}, format="json",
+		)
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["file_path"], "photos/Дополнительные/Царапина на двери слева.jpg")
+		folder = self.in_progress / self.folder / "photos" / "Дополнительные"
+		self.assertTrue((folder / "Царапина на двери слева.jpg").is_file())
+		self.assertFalse((folder / "Царапина.jpg").exists())
+
+		self.assertEqual(
+			self.client.patch(f"/cars/protocol-photos/{photo_id}/rename/", {"title": ""}, format="json").status_code,
+			400,
+		)
+		slot_id = self.upload_photo("odometer_photo").data["id"]
+		self.assertEqual(
+			self.client.patch(f"/cars/protocol-photos/{slot_id}/rename/", {"title": "x"}, format="json").status_code,
+			400,
+		)
+
 	def test_photo_slots_follow_excel_scheme(self):
 		self.client.force_authenticate(user=self.measurer)
 		slots = self.client.get("/cars/protocol-photo-slots/").data
@@ -1497,6 +1556,52 @@ class ProtocolFileStorageTests(TestCase):
 		self.protocol.refresh_from_db()
 		self.assertEqual(self.protocol.first_generated_date, date(2026, 11, 1))
 
+	def test_first_generation_pins_verifications(self):
+		templates_dir = self.temp / "templates"
+		templates_dir.mkdir()
+		self.make_document_templates(templates_dir)
+		today = timezone.localdate()
+		Protocol.objects.filter(pk=self.protocol.pk).update(protocol_date=today)
+		equipment = Equipment.objects.create(code="СИ028", name="ФП 12", kind="si", sort_order=1)
+		old = EquipmentVerification.objects.create(
+			equipment=equipment, number="OLD-1", start_date=today - timedelta(days=100), months=12,
+		)
+
+		self.assertEqual(self.generate_documents(templates_dir)[0].status_code, 200)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.pinned_verifications, {"СИ028": old.id})
+
+		# Новая поверка «сразу с даты начала» на выпущенный протокол не влияет.
+		EquipmentVerification.objects.create(
+			equipment=equipment, number="NEW-2", start_date=today - timedelta(days=5), months=12,
+			supersedes_previous=True,
+		)
+		self.generate_documents(templates_dir)
+		self.protocol.refresh_from_db()
+		self.assertEqual(self.protocol.pinned_verifications, {"СИ028": old.id})
+		values, _ = build_equipment_verification_values(self.protocol)
+		self.assertIn("OLD-1", values["eq_si028_verification"])
+
+		# Закрепленную поверку удалить нельзя.
+		self.client.force_authenticate(user=self.superuser)
+		response = self.client.delete(
+			f"/cars/equipment-verifications/{old.id}/delete/", {"confirm_text": "удалить"}, format="json",
+		)
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("00001", response.data["detail"])
+
+	def test_verification_check_lists_missing_equipment(self):
+		Protocol.objects.filter(pk=self.protocol.pk).update(protocol_date=date(2026, 10, 23))
+		equipment = Equipment.objects.create(code="СИ035", name="Рулетка RGK R-5", kind="si", sort_order=1)
+		EquipmentVerification.objects.create(
+			equipment=equipment, number="R-5", start_date=date(2026, 10, 29), months=12,
+		)
+		self.client.force_authenticate(user=self.measurer)
+
+		response = self.client.get(f"/cars/protocols/{self.protocol.id}/verification-check/")
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["missing"], [{"code": "СИ035", "name": "Рулетка RGK R-5"}])
+
 	def test_generate_skips_documents_without_template(self):
 		templates_dir = self.temp / "templates"
 		templates_dir.mkdir()
@@ -1662,6 +1767,271 @@ class EquipmentVerificationTests(TestCase):
 		self.assertEqual(verification_on(items, date(2026, 12, 2)), self.old)
 		self.assertEqual(verification_on(items, date(2026, 12, 3)), new)
 		self.assertIsNone(verification_on(items, date(2025, 12, 2)))
+
+	def test_superseding_verification_takes_over_from_its_start(self):
+		new = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="С-АЭ/25-11-2026/ 1", start_date=date(2026, 11, 25), months=12,
+			supersedes_previous=True,
+		)
+		later = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="С-АЭ/01-06-2027/ 2", start_date=date(2027, 6, 1), months=12,
+		)
+		items = [self.old, new, later]
+		# До начала новой — старая.
+		self.assertEqual(verification_on(items, date(2026, 11, 24)), self.old)
+		# С даты начала новая заменяет старую, хотя та еще действует до 02.12.2026.
+		self.assertEqual(verification_on(items, date(2026, 11, 25)), new)
+		# Следующая без отметки ждет окончания отмеченной (до 24.11.2027).
+		self.assertEqual(verification_on(items, date(2027, 7, 1)), new)
+		self.assertEqual(verification_on(items, date(2027, 11, 25)), later)
+
+	def test_orientation_cannot_change_for_ended_verification(self):
+		director = User.objects.create_user(username="director", password="x")
+		director.groups.add(Group.objects.get_or_create(name="executive_director")[0])
+		self.client.force_authenticate(user=director)
+		ended = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="С-АЭ/01-01-2020/ 9", start_date=date(2020, 1, 1), months=12,
+		)
+		today = timezone.localdate()
+		active = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="С-АЭ/активная/ 10", start_date=today - timedelta(days=10), months=12,
+		)
+
+		response = self.client.patch(
+			f"/cars/equipment-verifications/{ended.id}/update/", {"supersedes_previous": True}, format="json",
+		)
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("supersedes_previous", response.data)
+		ended.refresh_from_db()
+		self.assertFalse(ended.supersedes_previous)
+
+		# Другие поля закончившейся поверки исправить можно.
+		self.assertEqual(
+			self.client.patch(
+				f"/cars/equipment-verifications/{ended.id}/update/", {"number": "С-АЭ/01-01-2020/ 99"}, format="json",
+			).status_code,
+			200,
+		)
+		# У действующей — переключается в обе стороны.
+		for value in (True, False):
+			self.assertEqual(
+				self.client.patch(
+					f"/cars/equipment-verifications/{active.id}/update/", {"supersedes_previous": value}, format="json",
+				).status_code,
+				200,
+			)
+		# Добавить уже закончившуюся с отметкой нельзя.
+		self.assertEqual(
+			self.client.post(
+				f"/cars/equipment/{self.equipment.id}/verifications/create/",
+				{"number": "старая", "start_date": "2019-01-01", "months": 12, "supersedes_previous": True},
+				format="json",
+			).status_code,
+			400,
+		)
+
+	def test_use_now_switch_works_like_radio_buttons(self):
+		director = User.objects.create_user(username="director", password="x")
+		director.groups.add(Group.objects.get_or_create(name="executive_director")[0])
+		self.client.force_authenticate(user=director)
+		today = timezone.localdate()
+		# Еще три поверки, действующие сегодня (вместе со старой из setUp — четыре).
+		first, second, third = (
+			EquipmentVerification.objects.create(
+				equipment=self.equipment, number=f"N{index}", start_date=today - timedelta(days=30 - index), months=12,
+			)
+			for index in range(3)
+		)
+
+		def used_now():
+			response = self.client.get("/cars/equipment/")
+			return response.data[0]["current_verification_id"]
+
+		# По умолчанию — начавшаяся раньше.
+		self.assertEqual(used_now(), self.old.id)
+
+		for chosen in (third, second, self.old, first, third):
+			with self.subTest(chosen=chosen.number):
+				response = self.client.post(f"/cars/equipment-verifications/{chosen.id}/use-now/")
+				self.assertEqual(response.status_code, 200)
+				self.assertEqual(response.data["current_verification_id"], chosen.id)
+				self.assertEqual(used_now(), chosen.id)
+
+		# Закончившуюся и еще не начавшуюся использовать сейчас нельзя.
+		future = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="будущая", start_date=today + timedelta(days=5), months=12,
+		)
+		ended = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="закончилась", start_date=date(2020, 1, 1), months=12,
+		)
+		for verification in (ended, future):
+			with self.subTest(refused=verification.number):
+				response = self.client.post(f"/cars/equipment-verifications/{verification.id}/use-now/")
+				self.assertEqual(response.status_code, 400)
+		self.assertEqual(used_now(), third.id)
+
+		measurer = User.objects.create_user(username="measurer", password="x")
+		self.client.force_authenticate(user=measurer)
+		self.assertEqual(self.client.post(f"/cars/equipment-verifications/{first.id}/use-now/").status_code, 403)
+
+	def director_client(self):
+		director = User.objects.create_user(username="director", password="x")
+		director.groups.add(Group.objects.get_or_create(name="executive_director")[0])
+		self.client.force_authenticate(user=director)
+
+	def test_verification_number_is_unique(self):
+		self.director_client()
+		other = Equipment.objects.create(code="СИ035", name="Рулетка RGK R-5", kind="si", sort_order=2)
+
+		# Тот же номер в другом регистре и без пробела — дубль.
+		response = self.client.post(
+			f"/cars/equipment/{other.id}/verifications/create/",
+			{"number": "с-аэ/03-12-2025/486235847", "start_date": "2026-10-29", "months": 12},
+			format="json",
+		)
+		self.assertEqual(response.status_code, 400)
+		self.assertIn("СИ028", str(response.data["number"]))
+
+		created = self.client.post(
+			f"/cars/equipment/{other.id}/verifications/create/",
+			{"number": "С-АЭ/29-10-2026/ 569671631", "start_date": "2026-10-29", "months": 12},
+			format="json",
+		)
+		self.assertEqual(created.status_code, 201)
+		new_id = created.data["verifications"][0]["id"]
+
+		# Исправить на чужой номер нельзя, свой номер оставить можно.
+		self.assertEqual(
+			self.client.patch(
+				f"/cars/equipment-verifications/{new_id}/update/",
+				{"number": self.old.number}, format="json",
+			).status_code,
+			400,
+		)
+		self.assertEqual(
+			self.client.patch(
+				f"/cars/equipment-verifications/{self.old.id}/update/",
+				{"number": self.old.number, "months": 12}, format="json",
+			).status_code,
+			200,
+		)
+
+	def test_delete_verification_requires_confirmation_word(self):
+		self.director_client()
+		url = f"/cars/equipment-verifications/{self.old.id}/delete/"
+
+		response = self.client.delete(url, {"confirm_text": "да"}, format="json")
+		self.assertEqual(response.status_code, 400)
+		self.assertTrue(EquipmentVerification.objects.filter(pk=self.old.pk).exists())
+
+		response = self.client.delete(url, {"confirm_text": "УДАЛИТЬ"}, format="json")
+		self.assertEqual(response.status_code, 200)
+		self.assertEqual(response.data["verifications"], [])
+		self.assertFalse(EquipmentVerification.objects.filter(pk=self.old.pk).exists())
+
+		measurer = User.objects.create_user(username="measurer", password="x")
+		self.client.force_authenticate(user=measurer)
+		another = EquipmentVerification.objects.create(
+			equipment=self.equipment, number="N-delete", start_date=date(2026, 1, 1), months=12,
+		)
+		self.assertEqual(
+			self.client.delete(
+				f"/cars/equipment-verifications/{another.id}/delete/", {"confirm_text": "удалить"}, format="json",
+			).status_code,
+			403,
+		)
+
+	def telegram_calls(self):
+		"""Подменяет обращения к Telegram и собирает отправленные сообщения."""
+		calls = []
+		patcher = patch(
+			"cars.services.verification_notifications.call_telegram",
+			side_effect=lambda method, payload=None: calls.append((method, payload)),
+		)
+		patcher.start()
+		self.addCleanup(patcher.stop)
+		return calls
+
+	@override_settings(TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_IDS=["-1001", "42"])
+	def test_expiry_telegram_once_a_day_with_list(self):
+		calls = self.telegram_calls()
+		today = date(2026, 11, 22)
+		# Старая из setUp действует до 02.12.2026 — осталось 10 дней.
+		other = Equipment.objects.create(code="СИ035", name="Рулетка RGK R-5", kind="si", sort_order=2)
+		EquipmentVerification.objects.create(
+			equipment=other, number="R-5", start_date=date(2025, 11, 25), months=12,
+		)
+
+		self.assertEqual(send_expiry_notifications(today), 2)
+		# Одно сообщение в каждый чат из TELEGRAM_CHAT_ID.
+		self.assertEqual([payload["chat_id"] for _, payload in calls], ["-1001", "42"])
+		text = calls[0][1]["text"]
+		self.assertIn("(2 шт.)", text)
+		self.assertIn("СИ028", text)
+		self.assertIn("действует до 02.12.2026 (осталось 10 дн.)", text)
+		self.assertIn("СИ035", text)
+
+		# Перезапуск сервера в тот же день — повторного сообщения нет.
+		self.assertEqual(send_expiry_notifications(today), 0)
+		self.assertEqual(len(calls), 2)
+
+		# На следующий день — снова одно сообщение; по прибору с новой поверкой — уже не пишем.
+		EquipmentVerification.objects.create(
+			equipment=self.equipment, number="NEW-FP12", start_date=date(2026, 11, 20), months=12,
+		)
+		self.assertEqual(send_expiry_notifications(today + timedelta(days=1)), 1)
+		self.assertEqual(len(calls), 4)
+		self.assertNotIn("СИ028", calls[-1][1]["text"])
+
+	@override_settings(TELEGRAM_BOT_TOKEN="", TELEGRAM_CHAT_IDS=[])
+	def test_expiry_telegram_skipped_without_settings(self):
+		calls = self.telegram_calls()
+		self.assertEqual(send_expiry_notifications(date(2026, 11, 22)), 0)
+		self.assertEqual(calls, [])
+		self.old.refresh_from_db()
+		self.assertIsNone(self.old.expiry_notified_on)
+
+	@override_settings(TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_IDS=["42"])
+	def test_test_message_does_not_mark_reminders(self):
+		calls = self.telegram_calls()
+		self.assertEqual(send_test_notification(date(2026, 11, 5)), 1)
+		self.assertIn("Тестовое сообщение", calls[0][1]["text"])
+		self.old.refresh_from_db()
+		self.assertIsNone(self.old.expiry_notified_on)
+
+	@override_settings(TELEGRAM_BOT_TOKEN="123:abc", TELEGRAM_CHAT_IDS=["42"])
+	def test_daily_status_says_all_ok_once_a_day(self):
+		calls = self.telegram_calls()
+		# Поверка из setUp действует до 02.12.2026: 05.11 до окончания 27 дней — всё в порядке.
+		today = date(2026, 11, 5)
+
+		self.assertEqual(send_daily_verification_status(today), "ok")
+		self.assertEqual(len(calls), 1)
+		text = calls[0][1]["text"]
+		self.assertIn("всё в порядке", text)
+		self.assertIn("Ближайшая: СИ028", text)
+		self.assertIn("до 02.12.2026 (осталось 27 дн.)", text)
+
+		# Перезапуск сервера в тот же день — второго сообщения нет; на следующий день — снова.
+		self.assertIsNone(send_daily_verification_status(today))
+		self.assertEqual(len(calls), 1)
+		self.assertEqual(send_daily_verification_status(today + timedelta(days=1)), "ok")
+		self.assertEqual(len(calls), 2)
+
+		# Когда до окончания 14 дней и меньше — список, а не «всё в порядке».
+		self.assertEqual(send_daily_verification_status(date(2026, 11, 22)), "expiring")
+		self.assertNotIn("всё в порядке", calls[-1][1]["text"])
+		self.assertIn("СИ028", calls[-1][1]["text"])
+		# В тот же день повторов нет ни списка, ни «всё в порядке».
+		self.assertIsNone(send_daily_verification_status(date(2026, 11, 22)))
+		self.assertEqual(len(calls), 3)
+
+	def test_long_message_is_split_for_telegram(self):
+		text = "\n".join(f"строка {index} " + "х" * 90 for index in range(100))
+		parts = split_message(text)
+		self.assertGreater(len(parts), 1)
+		self.assertTrue(all(len(part) <= 3900 for part in parts))
+		self.assertEqual("\n".join(parts), text)
 
 	def test_document_text_and_placeholders(self):
 		self.assertEqual(

@@ -174,6 +174,12 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'ru-ru'
 
+# Telegram: сообщение о скором окончании поверок (services/verification_notifications.py).
+# Токен бота от @BotFather и номера чатов через запятую (узнать: manage.py telegram_chat_id).
+# Без них сообщения не отправляются (предупреждение в лог).
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+TELEGRAM_CHAT_IDS = env_list('TELEGRAM_CHAT_ID', '')
+
 # Лаборатория во Владивостоке: даты отбора/протокола и имена папок — по местному времени.
 TIME_ZONE = 'Asia/Vladivostok'
 

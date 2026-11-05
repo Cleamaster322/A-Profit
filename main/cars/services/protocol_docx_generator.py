@@ -18,6 +18,7 @@ from .equipment_verification import (
     MissingVerificationError,
     build_equipment_verification_values,
     missing_verifications_message,
+    pin_verifications,
     protocol_sample_date,
 )
 from .evaluation_sheet import build_evaluation_context
@@ -104,6 +105,9 @@ def generate_protocol_documents(protocol, allow_missing_verifications=False):
     if protocol.first_generated_date is None:
         protocol.first_generated_date = timezone.localdate()
         protocol.save(update_fields=["first_generated_date"])
+    # Поверки закрепляются один раз; протоколы, выпущенные до закрепления, — при следующем «Сформировать».
+    if not protocol.pinned_verifications:
+        pin_verifications(protocol, allow_missing=allow_missing_verifications)
 
     # Папка называется по VIN: если переименовать раньше не удалось, пробуем ещё раз.
     folder_warning = sync_protocol_folder(protocol)

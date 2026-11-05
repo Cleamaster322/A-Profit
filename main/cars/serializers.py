@@ -5,8 +5,10 @@ from rest_framework import serializers
 from django.contrib.auth.models import User, Group
 from django.conf import settings
 from django.urls import reverse
+from django.utils import timezone
 
-from .photo_slots import PHOTO_SLOT_TITLES, slot_photos
+from .photo_slots import EXTRA_PHOTO_TYPE, PHOTO_SLOT_TITLES, extra_photos, slot_photos
+from .services.equipment_verification import normalize_verification_number, verification_end_date
 from .services.protocol_docx.calculations import (
     calc_axle_mass_range_kg,
     calc_drom_full_mass_kg,
@@ -646,6 +648,7 @@ class ProtocolPhotoSerializer(serializers.ModelSerializer):
             'id',
             'protocol',
             'photo_type',
+            'title',
             'file_path',
             'file_url',
             'caption',
@@ -655,6 +658,7 @@ class ProtocolPhotoSerializer(serializers.ModelSerializer):
         read_only_fields = [
             'id',
             'protocol',
+            'title',
             'file_path',
             'file_url',
             'caption',
@@ -673,15 +677,21 @@ class ProtocolPhotoSerializer(serializers.ModelSerializer):
         return reverse('protocol-photo-file', kwargs={'photo_id': obj.id})
 
     def get_caption(self, obj):
+        if obj.photo_type == EXTRA_PHOTO_TYPE:
+            return obj.title
         return PHOTO_SLOT_TITLES.get(obj.photo_type, obj.photo_type)
 
 
 class SlotPhotosMixin(serializers.Serializer):
-    # Только фото из схемы фотофиксации, старые типы не отдаём.
+    # Фото из схемы фотофиксации и дополнительные фото; старые типы не отдаём.
     photos = serializers.SerializerMethodField()
 
     def get_photos(self, obj):
-        return ProtocolPhotoSerializer(slot_photos(obj), many=True, context=self.context).data
+        return ProtocolPhotoSerializer(
+            slot_photos(obj) + extra_photos(obj),
+            many=True,
+            context=self.context,
+        ).data
 
 
 class ProtocolTestConditionSerializer(
@@ -1365,16 +1375,58 @@ class EquipmentVerificationSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = EquipmentVerification
-        fields = ['id', 'equipment', 'number', 'start_date', 'months', 'end_date', 'created_at', 'updated_at']
+        fields = [
+            'id', 'equipment', 'number', 'start_date', 'months', 'end_date',
+            'supersedes_previous', 'created_at', 'updated_at',
+        ]
         read_only_fields = ['id', 'equipment', 'end_date', 'created_at', 'updated_at']
 
     def validate_number(self, value):
         value = (value or '').strip()
         if not value:
             raise serializers.ValidationError('Укажите номер свидетельства / протокола.')
+
+        # Номер уникален: «С-АЭ/03-12-2025/ 486235847» и «с-аэ/03-12-2025/486235847» — один номер.
+        key = normalize_verification_number(value)
+        others = EquipmentVerification.objects.select_related('equipment')
+        if self.instance is not None:
+            others = others.exclude(pk=self.instance.pk)
+        duplicate = next(
+            (item for item in others if normalize_verification_number(item.number) == key),
+            None,
+        )
+        if duplicate:
+            raise serializers.ValidationError(
+                f'Поверка с таким номером уже есть: {duplicate.equipment.code} {duplicate.equipment.name} '
+                f'(от {duplicate.start_date:%d.%m.%Y}).'
+            )
         return value
 
     def validate_months(self, value):
         if not 1 <= value <= 240:
             raise serializers.ValidationError('Срок — от 1 до 240 месяцев.')
         return value
+
+    def validate(self, attrs):
+        # Выбор при пересечении у закончившейся поверки менять нельзя (ни включить, ни снять):
+        # иначе в уже выпущенных протоколах при пересборке сменится свидетельство.
+        if 'supersedes_previous' not in attrs:
+            return attrs
+
+        instance = self.instance
+        if instance is not None and attrs['supersedes_previous'] == instance.supersedes_previous:
+            return attrs
+        if instance is None and not attrs['supersedes_previous']:
+            return attrs
+
+        start = attrs.get('start_date', getattr(instance, 'start_date', None))
+        months = attrs.get('months', getattr(instance, 'months', None))
+        ends = [verification_end_date(start, months)] if start and months else []
+        if instance is not None:
+            ends.append(instance.end_date)
+
+        if any(end < timezone.localdate() for end in ends):
+            raise serializers.ValidationError({
+                'supersedes_previous': 'Поверка уже закончилась — выбирать ее для пересечения нельзя.',
+            })
+        return attrs

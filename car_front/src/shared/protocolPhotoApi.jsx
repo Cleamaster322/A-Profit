@@ -12,11 +12,15 @@ export const getProtocolPhotos = async (protocolId) => {
 };
 
 // В слоте одно фото: загрузка заменяет предыдущее фото этого слота.
-export const uploadProtocolPhoto = async (protocolId, file, photoType) => {
+// Дополнительное фото (photoType "extra") добавляется с названием title.
+export const uploadProtocolPhoto = async (protocolId, file, photoType, title = "") => {
     const formData = new FormData();
 
     formData.append("photo_type", photoType);
     formData.append("file", file);
+    if (title) {
+        formData.append("title", title);
+    }
 
     const response = await api.post(
         `/cars/protocols/${protocolId}/photos/create/`,
@@ -28,6 +32,11 @@ export const uploadProtocolPhoto = async (protocolId, file, photoType) => {
         }
     );
 
+    return response.data;
+};
+
+export const renameProtocolPhoto = async (photoId, title) => {
+    const response = await api.patch(`/cars/protocol-photos/${photoId}/rename/`, {title});
     return response.data;
 };
 
